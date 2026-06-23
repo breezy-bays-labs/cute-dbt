@@ -40,10 +40,12 @@
 //! `code_map.raw_node_spans` / `code_map.raw_column_spans` — live in `render.rs`
 //! beside their compiled twins (`node_spans` / `column_spans`).
 
-use crate::adapters::cte_engine::TERMINAL_NODE_NAME;
+use crate::adapters::cte_engine::{ByteIndex, TERMINAL_NODE_NAME};
 use crate::adapters::render::{byte_span, find_close, find_expr_close};
 use crate::domain::source_map::{SourceMap, SpanRole};
 use crate::domain::span::SourceSpan;
+use sqlparser::dialect::GenericDialect;
+use sqlparser::tokenizer::{Token, Tokenizer, Whitespace};
 
 /// Fill the reserved `raw` slot of every NON-zone `CteBody` / `Column` entry of
 /// `sm` whose name resolves to a UNIQUE lexical anchor in the masked `raw` text.
@@ -217,56 +219,35 @@ fn balanced_close(masked: &str, open: usize) -> Option<usize> {
     None
 }
 
-/// What the masker recognizes at a LIVE-state byte `i` — the classification of a
-/// single forward step. `Region { end }` is a non-SQL-structural region spanning
-/// `[i, end)` to blank; `Skip` is a byte that opens nothing (advance one).
-/// `Malformed` is an unterminated Jinja region ⇒ the whole mask fails closed.
+/// What the Jinja masker recognizes at a LIVE-state byte `i` — the
+/// classification of a single forward step over the RAW text. `Region { end }`
+/// is a `{…}` Jinja region spanning `[i, end)` to blank; `Skip` is a byte that
+/// opens no Jinja region (advance one). `Malformed` is an unterminated Jinja
+/// region ⇒ the whole mask fails closed.
 enum Step {
     /// Blank `[i, end)` and resume at `end`.
     Region { end: usize },
-    /// Not a region opener at `i`; advance one byte (`b'$'` lone / ordinary byte).
+    /// Not a Jinja opener at `i`; advance one byte.
     Skip,
-    /// An unterminated Jinja region ⇒ `mask_regions` returns `None` (fail-closed).
+    /// An unterminated Jinja region ⇒ `mask_jinja` returns `None` (fail-closed).
     Malformed,
 }
 
-/// Classify the opener at LIVE byte `i` into a single [`Step`]. This is the ONE
-/// dispatch point — it keeps `mask_regions`'s loop CC low by delegating each
-/// region kind to its own small scanner. Order matters only where two openers
-/// could share a lead byte; here every opener has a distinct lead byte (`{` / `-`
-/// / `/` / `'` / `"` / `$`) or a distinct two-byte prefix, so the order below is
-/// free of overlap.
+/// Classify the opener at LIVE byte `i` into a single [`Step`] for the Jinja
+/// pass. The ONLY region kind this pass recognizes is a `{`-led Jinja tag
+/// (`{{…}}` / `{%…%}` / `{#…#}`); SQL strings/comments/dollar-quotes are left for
+/// the tokenizer pass. A SQL string's `'…'` is intentionally NOT honored here, so
+/// a `{{` that lives inside a SQL string is still seen by the Jinja scanner —
+/// which is sound: a `{{` in data is masked-or-fail-closed (over-mask), never
+/// under-masked. (The tokenizer pass then re-masks the SQL string over the same
+/// bytes; double-masking a region is idempotent.)
 fn classify_opener(bytes: &[u8], i: usize) -> Step {
     let n = bytes.len();
-    let b = bytes[i];
-    if b == b'{' && i + 1 < n {
+    if bytes[i] == b'{' && i + 1 < n {
         return match jinja_close(bytes, i) {
             JinjaOpen::Close(end) => Step::Region { end },
             JinjaOpen::NotAnOpener => Step::Skip,
             JinjaOpen::Unterminated => Step::Malformed,
-        };
-    }
-    if b == b'-' && i + 1 < n && bytes[i + 1] == b'-' {
-        return Step::Region {
-            end: scan_line_comment(bytes, i),
-        };
-    }
-    if b == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
-        return Step::Region {
-            end: scan_block_comment(bytes, i),
-        };
-    }
-    if b == b'\'' || b == b'"' {
-        return Step::Region {
-            end: scan_sql_quoted(bytes, i),
-        };
-    }
-    if b == b'$' {
-        // A well-formed dollar-quote is a region; a lone `$` / `$1` param is not
-        // an opener (it cannot hide a name) and is skipped one byte.
-        return match scan_dollar_quote(bytes, i) {
-            Some(end) => Step::Region { end },
-            None => Step::Skip,
         };
     }
     Step::Skip
@@ -297,33 +278,11 @@ fn jinja_close(bytes: &[u8], i: usize) -> JinjaOpen {
     }
 }
 
-/// `--` line comment: blank to end-of-line (the `\n` stays live). Returns the
-/// byte index of the `\n` (or `n` at EOF).
-fn scan_line_comment(bytes: &[u8], open: usize) -> usize {
-    let n = bytes.len();
-    let mut j = open + 2;
-    while j < n && bytes[j] != b'\n' {
-        j += 1;
-    }
-    j
-}
-
-/// `/* … */` block comment: return the index PAST the closing `*/`, or EOF if
-/// unterminated (an unterminated block comment swallows the rest, mirroring a SQL
-/// lexer; never a false anchor past it).
-fn scan_block_comment(bytes: &[u8], open: usize) -> usize {
-    let n = bytes.len();
-    let mut j = open + 2;
-    while j + 1 < n && !(bytes[j] == b'*' && bytes[j + 1] == b'/') {
-        j += 1;
-    }
-    if j + 1 < n { j + 2 } else { n }
-}
-
 /// Return a copy of `raw` with EVERY non-SQL-structural lexical region replaced
 /// by spaces, BYTE-FOR-BYTE (offsets preserved, so a span over the masked text
 /// indexes the same region of the original `raw`). Returns `None` on a
-/// malformed/unterminated Jinja region (fail-closed — mirrors `scan_block_tags`).
+/// malformed/unterminated Jinja region OR a `Tokenizer` error (fail-closed —
+/// mirrors `scan_block_tags`).
 ///
 /// Masking (not deletion) is the load-bearing honesty primitive: a CTE/column
 /// name that only appears INSIDE one of these regions is blanked out, so it can
@@ -331,83 +290,95 @@ fn scan_block_comment(bytes: &[u8], open: usize) -> usize {
 /// name in commented-out code, a string literal, or a templated region is not a
 /// live definition (never-a-false-claim, cute-dbt#469).
 ///
+/// ## Two passes (Jinja, then SQL-lexer)
+///
+/// 1. **Jinja pass** ([`mask_jinja`]) — blanks every `{{…}}` / `{%…%}` / `{#…#}`
+///    region with render.rs's vetted close-finders (`find_close` /
+///    `find_expr_close`), the SAME scanners the zone path uses, so both agree on
+///    Jinja boundaries (including the backslash string-escape) on the SAME model.
+///    sqlparser does NOT understand Jinja — masking it first hides every
+///    template fragment from the tokenizer. An unterminated Jinja region ⇒ the
+///    WHOLE mask fails closed (`None`).
+/// 2. **SQL-lexer pass** ([`mask_sql_tokens`]) — tokenizes the Jinja-masked text
+///    with `sqlparser::tokenizer::Tokenizer` under the `GenericDialect` (the SAME
+///    dialect `cte_engine` parses with, so raw and compiled never diverge on SQL
+///    lexing), and blanks the byte span of every STRING / COMMENT / DOLLAR-QUOTE
+///    token. A `TokenizerError` ⇒ the WHOLE text is blanked (maximal over-mask =
+///    fail closed; nothing can leak).
+///
 /// ## SOUNDNESS INVARIANT (the never-a-false-claim keystone)
 ///
 /// `mask_regions` never leaves a name-bearing non-SQL-structural region live; on
-/// uncertainty it OVER-masks, yielding honest omission, never a false anchor. The
-/// only possible failure mode of this pass is over-masking (blanking too much, so
-/// a live name is omitted = honest) — NEVER under-masking (leaving a name-bearing
-/// non-structural region live = a false anchor). Every design choice below is
-/// biased toward masking MORE, so the bias is one-directional and the failure
-/// mode is provably the honest one:
+/// uncertainty it OVER-masks (honest omission), never under-masks (a false
+/// anchor). The masker's only error direction is masking too much:
 ///
-/// - A `…'…'` string whose opening quote is **prefixed** by an identifier char or
-///   `&` (`DuckDB` escape-strings `E'…'`/`e'…'`, Unicode escape-strings `U&'…'`, and
-///   any future prefixed form) honors BOTH the `''` doubled-quote escape AND the
-///   backslash `\'` escape, so the string extends to its TRUE end and never closes
-///   early on an internal escaped quote. Honoring an extra escape can only EXTEND
-///   the masked region (the string runs further) = over-mask = sound. A BARE `'…'`
-///   (no prefix) honors only `''` (standard SQL — a backslash is a literal byte).
-/// - Quoted identifiers `"…"` honor `""` (the doubled-quote escape).
-/// - An unterminated string / quoted-ident / dollar-quote / block comment masks to
-///   EOF (swallowing every trailing name) = over-mask = sound.
-/// - A `{`-led Jinja region that cannot resolve its close ⇒ the WHOLE mask fails
-///   closed (`None` ⇒ the model emits nothing) = the maximal over-mask = sound.
-/// - Any opener the masker recognizes but cannot confidently resolve prefers
-///   masking MORE (to EOF) over leaving live. The only construct deliberately left
-///   live is a `$` that is NOT a well-formed dollar-quote opener (a lone `$`, a
-///   `$1` positional param): it is not a region opener and **cannot hide a name**
-///   (a name needs identifier bytes; a bare `$`/`$1` carries none past itself), so
-///   leaving it live cannot produce a false anchor.
+/// - The SQL-lexer pass blanks EVERY string / comment / dollar-quote token the
+///   tokenizer recognizes, with the tokenizer's own escape handling
+///   (`''`/`""`/`\'`, dollar-tags, prefixed `E'…'`/`U&'…'`, `N'…'`, `X'…'`,
+///   `B'…'`, …). The single home of the SQL string-escape logic is now the
+///   tokenizer itself (no hand-rolled escape code to drift).
+/// - A **quoted identifier** (`"my col"`, `` `my col` ``, `")"`) is `Token::Word`
+///   with a `quote_style`. Though technically a live name, it is BLANKED in the
+///   over-mask (honest) direction — both for paren-balance soundness (a `)` inside
+///   `")"` is not a structural paren) and behavior-parity with the old masker
+///   (such names are already honestly omitted at the fill layer). See
+///   [`is_maskable_token`] for the full reasoning. An UNQUOTED `Word` (a bare
+///   identifier) is the only `Word` form left live — the only one carrying a
+///   matchable name.
+/// - A `TokenizerError` (e.g. an unterminated string, a malformed `U&'…\\…'`
+///   unicode escape) ⇒ the WHOLE text is blanked = the maximal over-mask = sound.
+/// - A malformed `{`-led Jinja region ⇒ the WHOLE mask fails closed (`None` ⇒ the
+///   model emits nothing) = the maximal over-mask = sound.
+/// - A lone `$` / `$1` positional param tokenizes as a `Placeholder` (not a
+///   dollar-quoted string), so it is left live — it carries no identifier bytes
+///   past itself and cannot hide a name, so leaving it live is sound.
 ///
 /// Because every uncertain case extends the masked region (or fails the whole
-/// model closed) and the one live-left case provably cannot hide a name,
-/// under-masking is impossible — the soundness invariant holds.
+/// model closed) and the only live-left forms (live SQL structure, bare
+/// identifiers, lone `$`) provably carry no hidden name, under-masking is
+/// impossible — the soundness invariant holds.
 ///
 /// ## Lexical-region exhaustiveness (the regions a name can hide in)
 ///
-/// A name can falsely hide in EXACTLY these region kinds in the duckdb-SQL + Jinja
-/// grammar a `raw_code` model body draws from. Each is masked here, so after this
-/// pass the only bytes a name can match against are LIVE SQL structure:
+/// A name can falsely hide in EXACTLY these region kinds in the SQL + Jinja
+/// grammar a `raw_code` model body draws from. Each is masked, so after both
+/// passes the only bytes a name can match against are LIVE SQL structure:
 ///
-/// | Region kind | Opener | Closer | In-region escape | Masked by |
-/// |---|---|---|---|---|
-/// | Jinja variable tag | `{{` | `}}` | backslash `\'` | `render::find_expr_close` |
-/// | Jinja block tag | `{%` | `%}` | backslash `\'` | `render::find_expr_close` |
-/// | Jinja comment | `{#` | `#}` | — | `render::find_close` |
-/// | SQL line comment | `--` | newline / EOF | — | `scan_line_comment` |
-/// | SQL block comment | `/*` | `*/` / EOF | — | `scan_block_comment` |
-/// | SQL string literal | `'` | `'` | doubled `''` (+ backslash `\'` when prefixed) | `scan_sql_quoted` |
-/// | SQL quoted identifier | `"` | `"` | doubled `""` | `scan_sql_quoted` |
-/// | Dollar-quoted string | `$tag$` / `$$` | matching `$tag$` | — (no escapes) | `scan_dollar_quote` |
+/// | Region kind | Token / opener | Masked by |
+/// |---|---|---|
+/// | Jinja variable tag | `{{` … `}}` | `mask_jinja` (`render::find_expr_close`) |
+/// | Jinja block tag | `{%` … `%}` | `mask_jinja` (`render::find_expr_close`) |
+/// | Jinja comment | `{#` … `#}` | `mask_jinja` (`render::find_close`) |
+/// | SQL line comment | `Whitespace::SingleLineComment` | `mask_sql_tokens` |
+/// | SQL block comment | `Whitespace::MultiLineComment` | `mask_sql_tokens` |
+/// | SQL string literal | `SingleQuotedString`, `EscapedStringLiteral`, `NationalStringLiteral`, `HexStringLiteral`, byte/raw/triple variants, … | `mask_sql_tokens` |
+/// | Unicode string literal | `UnicodeStringLiteral` | `mask_sql_tokens` |
+/// | Dollar-quoted string | `DollarQuotedString` | `mask_sql_tokens` |
+/// | SQL quoted identifier | `Word { quote_style: Some(_) }` | `mask_sql_tokens` (over-mask; see [`is_maskable_token`]) |
 ///
-/// Dollar-quoted strings ARE in scope: duckdb accepts PostgreSQL-style
-/// `$tag$…$tag$` / `$$…$$` string constants in a SELECT body, so a name inside one
-/// must not anchor. They are masked here. (If a `$`-run is NOT a well-formed
-/// dollar-quote opener — e.g. a lone `$` or `$1` positional param — it is left
-/// live and advanced over one byte; it is not a region opener, so it cannot hide
-/// a name.)
-///
-/// The Jinja close-finders are render.rs's vetted scanners
-/// (`render::find_close` / `render::find_expr_close`), so the raw-span path and
-/// the zone path (`scan_block_tags`) agree on Jinja boundaries — including the
-/// backslash string-escape — on the SAME model (one shared implementation, no
-/// divergence). The SQL doubled-quote (+ prefixed-backslash) escape logic lives in
-/// ONE place (`scan_sql_quoted`).
-///
-/// **Precedence — a single forward pass.** From a LIVE state, whichever opener is
-/// reached first claims its region; the scanner resumes at that region's end.
-/// A `--` inside a string is already consumed (inside the string region); a `'`
-/// inside a comment is already consumed; a `{` inside a string is already
-/// consumed; etc. This mirrors a lexer's single forward pass — no opener is ever
-/// honoured inside another region. Per-step classification is delegated to
-/// [`classify_opener`], keeping this loop a thin dispatch.
+/// Note `DoubleQuotedString` is enumerated too: under `GenericDialect` a `"…"`
+/// tokenizes as a quoted IDENTIFIER (`Word`), so `DoubleQuotedString` does not
+/// arise for `"`; it is included for completeness/robustness against any dialect
+/// configuration where `"…"` is a string literal (masking it is sound either
+/// way).
 pub(crate) fn mask_regions(raw: &str) -> Option<String> {
+    // Pass 1 — Jinja (sqlparser does not understand it). Fail-closed on a
+    // malformed region (the whole model emits nothing).
+    let jinja_masked = mask_jinja(raw)?;
+    // Pass 2 — SQL strings/comments/dollar-quotes via the shared tokenizer.
+    Some(mask_sql_tokens(&jinja_masked))
+}
+
+/// Pass 1: blank every `{{…}}` / `{%…%}` / `{#…#}` Jinja region of `raw`,
+/// offset-preserving. Returns `None` on a malformed/unterminated Jinja region
+/// (fail-closed). render.rs's vetted close-finders are reused so the raw-span
+/// path and the zone path agree on Jinja boundaries on the SAME model.
+fn mask_jinja(raw: &str) -> Option<String> {
     let bytes = raw.as_bytes();
     let n = bytes.len();
-    // Start from the original bytes; blank every non-structural region in place.
-    // We only ever overwrite ASCII bytes with ASCII spaces, so the result stays
-    // valid UTF-8 and every byte offset is preserved.
+    // Start from the original bytes; blank every Jinja region in place. We only
+    // ever overwrite ASCII bytes with ASCII spaces, so the result stays valid
+    // UTF-8 and every byte offset is preserved.
     let mut out = raw.as_bytes().to_vec();
     let mut i = 0usize;
     while i < n {
@@ -421,117 +392,135 @@ pub(crate) fn mask_regions(raw: &str) -> Option<String> {
             Step::Malformed => return None,
         }
     }
-    // SAFETY-FREE: we only replaced ASCII bytes with ASCII spaces over byte
-    // ranges that began at an ASCII opener (a char boundary), so the result is
-    // valid UTF-8. Use the checked constructor regardless (no unsafe).
     String::from_utf8(out).ok()
 }
 
-/// Whether the `'` quote at `open` is PREFIXED by an identifier char or `&` —
-/// the lexical signature of a `DuckDB`/Postgres prefixed string constant
-/// (`E'…'`/`e'…'` escape-strings, `U&'…'` Unicode escape-strings, etc.). Only a
-/// SINGLE-quote can carry such a prefix; a `"` quoted identifier never does.
+/// Pass 2: blank the byte span of every STRING / COMMENT / DOLLAR-QUOTE token of
+/// `jinja_masked` via `sqlparser::tokenizer::Tokenizer` under the SAME
+/// `GenericDialect` `cte_engine` parses with (so raw & compiled never diverge on
+/// SQL lexing). On a `TokenizerError` the WHOLE text is blanked (fail-closed —
+/// nothing can leak). Offset-preserving: the tokenizer's `Location` line/col
+/// endpoints are converted to byte offsets via the shared [`ByteIndex`].
 ///
-/// SOUND-BY-CONSTRUCTION: a prefixed `'…'` string honors the backslash `\'`
-/// escape IN ADDITION to the `''` doubled-quote escape, so its masked region can
-/// only EXTEND (never close early on an internal `\'`). Honoring an extra escape
-/// over-masks = the honest failure direction. A false positive here (treating a
-/// bare `'…'` as prefixed because some identifier byte happens to abut it, e.g.
-/// `col'x'`) merely makes the string honor an extra escape — still over-masking,
-/// still sound — so the prefix test is deliberately permissive.
-fn quote_has_string_prefix(bytes: &[u8], open: usize) -> bool {
-    if bytes[open] != b'\'' || open == 0 {
-        return false;
-    }
-    let p = bytes[open - 1];
-    is_ident_byte(p) || p == b'&'
-}
-
-/// Scan a LIVE SQL quoted region opened by `bytes[open]` (a `'` or `"`); return
-/// the byte index PAST the closing quote. Escapes honored:
-/// - the SQL **doubled-quote** escape (always): a `''` inside a `'…'` (or `""`
-///   inside a `"…"`) is an escaped quote char that stays in-string.
-/// - the **backslash** escape (`\'`/`\\`) ONLY for a PREFIXED single-quote string
-///   (`E'…'`/`e'…'`/`U&'…'`, detected by [`quote_has_string_prefix`]): a backslash
-///   consumes the next byte so an escaped quote does not close the string early.
-///
-/// A BARE `'…'` does NOT honor backslash (standard SQL: a backslash is a literal
-/// byte) — so `'a\'` is a complete two-char string `a\` followed by live SQL; the
-/// honoring of `\'` is gated on the prefix precisely so standard-SQL strings are
-/// not over-extended. An unterminated literal swallows to EOF (returns `n`) —
-/// mirroring a SQL lexer; never a false anchor past the open quote. This is the
-/// single home of the SQL string-escape logic (cute-dbt#469).
-///
-/// SOUNDNESS: every escape honored here can only EXTEND the region (carry the
-/// scanner past a byte that might otherwise have closed it), so this scanner's
-/// only error direction is over-masking = honest omission, never under-masking.
-fn scan_sql_quoted(bytes: &[u8], open: usize) -> usize {
-    let n = bytes.len();
-    let q = bytes[open];
-    // A prefixed single-quote escape-string (`E'…'`/`U&'…'`/…) also honors `\'`.
-    let honor_backslash = quote_has_string_prefix(bytes, open);
-    let mut i = open + 1;
-    while i < n {
-        let b = bytes[i];
-        if honor_backslash && b == b'\\' && i + 1 < n {
-            // Backslash escape: the next byte is escaped (stays in-string),
-            // including an escaped closing quote `\'`. Skip both.
-            i += 2;
+/// A quoted identifier (`Token::Word { quote_style: Some(_) }`, e.g. `"my col"`,
+/// `` `c` ``, `")"`) is ALSO blanked here — see [`is_maskable_token`] for the
+/// soundness reasoning (behavior-parity with the old hand-rolled masker + the
+/// paren-balance invariant).
+fn mask_sql_tokens(jinja_masked: &str) -> String {
+    let Ok(tokens) = Tokenizer::new(&GenericDialect {}, jinja_masked).tokenize_with_location()
+    else {
+        // FAIL CLOSED — a tokenizer error (unterminated string, malformed unicode
+        // escape, …) blanks everything so no interior name can ever leak.
+        return " ".repeat(jinja_masked.len());
+    };
+    let bytes = jinja_masked.as_bytes();
+    let mut out = bytes.to_vec();
+    let index = ByteIndex::new(jinja_masked);
+    for tok in &tokens {
+        if !is_maskable_token(&tok.token) {
             continue;
         }
-        if b == q {
-            if i + 1 < n && bytes[i + 1] == q {
-                // Doubled quote: an escaped quote char; stay in-string.
-                i += 2;
-                continue;
-            }
-            return i + 1;
+        let start = index.byte_of(jinja_masked, tok.span.start);
+        let mut end = index.byte_of(jinja_masked, tok.span.end);
+        // A `SingleLineComment` token's span INCLUDES its terminating newline.
+        // Blanking that `\n` would shift the line/col of every downstream span
+        // (`byte_span` counts `\n` over the masked text), making the emitted
+        // line/col disagree with the TRUE raw source — a location regression
+        // even though the byte offset stays correct. Preserve a single trailing
+        // `\n` (the line comment's own terminator) so masked-text line structure
+        // matches the raw exactly. Only line comments end in `\n`; every other
+        // maskable token blanks its full span. (The `\n`'s liveness is harmless:
+        // a newline carries no name and no paren.)
+        if matches!(
+            tok.token,
+            Token::Whitespace(Whitespace::SingleLineComment { .. })
+        ) && end > start
+            && bytes[end - 1] == b'\n'
+        {
+            end -= 1;
         }
-        i += 1;
+        blank(&mut out, start, end);
     }
-    n
+    // We only replaced bytes with ASCII spaces over token spans, so the result is
+    // valid UTF-8. Fall back to the input on the impossible failure (never lossy).
+    String::from_utf8(out).unwrap_or_else(|_| jinja_masked.to_owned())
 }
 
-/// Scan a possible duckdb dollar-quoted string opened at `bytes[open]` (a `$`).
-/// A dollar-quote tag is `$` then zero-or-more tag chars (`[A-Za-z0-9_]`, must not
-/// start with a digit) then `$`; the string runs to the matching `$tag$`
-/// (`$$…$$` for the empty tag). There are NO in-string escapes — the only thing
-/// that closes it is the verbatim closing tag. Returns the byte index PAST the
-/// closing tag, or `None` if `bytes[open..]` is NOT a well-formed dollar-quote
-/// opener (so the caller leaves it live). An opened-but-unterminated dollar-quote
-/// swallows to EOF (returns `Some(n)`) — never a false anchor past the opener.
-fn scan_dollar_quote(bytes: &[u8], open: usize) -> Option<usize> {
-    let n = bytes.len();
-    // Parse the opening tag `$<tag>$`.
-    let mut j = open + 1;
-    while j < n && (bytes[j].is_ascii_alphanumeric() || bytes[j] == b'_') {
-        // A tag must not start with a digit (Postgres/duckdb rule).
-        if j == open + 1 && bytes[j].is_ascii_digit() {
-            return None;
-        }
-        j += 1;
+/// Whether `token` is a non-SQL-structural region whose byte span must be
+/// blanked: every STRING literal form, every COMMENT, the DOLLAR-QUOTE string,
+/// and every QUOTED IDENTIFIER (`Word { quote_style: Some(_) }`). Enumerated
+/// exhaustively over the sqlparser 0.62 `Token` variants so a new string form
+/// cannot silently slip through unmasked.
+///
+/// ## Why quoted identifiers are masked (soundness)
+///
+/// A quoted identifier (`"my col"`, `` `c` ``, `")"`) is technically a LIVE name,
+/// but it is blanked here for two reasons, both biased toward the honest
+/// (over-mask) direction:
+///
+/// 1. **Paren-balance soundness.** `cte_raw_span` finds a CTE body's `( … )`
+///    extent by balancing parens over the masked text ([`balanced_close`]). A
+///    `)` *inside* a quoted identifier (`select ")" as x`) is NOT a structural
+///    paren — leaving it live would let it close the balance early and emit a
+///    TRUNCATED span (`stg as (select ")`), a FALSE claim about where the CTE
+///    ends. Blanking the whole quoted-identifier token removes its interior
+///    parens from the structural count, so the balance stays sound.
+/// 2. **Behavior parity.** The old hand-rolled masker blanked `"…"` quoted
+///    identifiers too, and quoted-identifier CTE/column names are already
+///    honestly OMITTED at the fill layer (their domain `node_id` is the unquoted
+///    content — e.g. `my col` — whose space breaks the whole-word match the
+///    scanner uses; see `quoted_identifier_cte_is_honestly_omitted`). So masking
+///    them changes nothing observable except keeping the masker
+///    behavior-identical to the pre-refactor path (hence goldens byte-stable).
+///
+/// Masking a live quoted identifier is over-masking = the honest failure
+/// direction; it can only ever DROP a (already-dropped) anchor, never fabricate
+/// one. An UNQUOTED `Word` (a real bare identifier) is left LIVE — that is the
+/// only `Word` form that carries a matchable name.
+fn is_maskable_token(token: &Token) -> bool {
+    if let Token::Word(w) = token {
+        // A quoted identifier is blanked (see doc); a bare identifier is live.
+        return w.quote_style.is_some();
     }
-    // The opening tag must close with a `$`.
-    if j >= n || bytes[j] != b'$' {
-        return None;
-    }
-    let tag = &bytes[open..=j]; // includes both `$` delimiters
-    let tag_len = tag.len();
-    // Scan for the matching closing tag `$tag$`.
-    let mut k = j + 1;
-    while k + tag_len <= n {
-        if &bytes[k..k + tag_len] == tag {
-            return Some(k + tag_len);
-        }
-        k += 1;
-    }
-    // Unterminated dollar-quote: swallow to EOF (never a false anchor past it).
-    Some(n)
+    matches!(
+        token,
+        Token::SingleQuotedString(_)
+            | Token::DoubleQuotedString(_)
+            | Token::TripleSingleQuotedString(_)
+            | Token::TripleDoubleQuotedString(_)
+            | Token::DollarQuotedString(_)
+            | Token::SingleQuotedByteStringLiteral(_)
+            | Token::DoubleQuotedByteStringLiteral(_)
+            | Token::TripleSingleQuotedByteStringLiteral(_)
+            | Token::TripleDoubleQuotedByteStringLiteral(_)
+            | Token::SingleQuotedRawStringLiteral(_)
+            | Token::DoubleQuotedRawStringLiteral(_)
+            | Token::TripleSingleQuotedRawStringLiteral(_)
+            | Token::TripleDoubleQuotedRawStringLiteral(_)
+            | Token::NationalStringLiteral(_)
+            | Token::QuoteDelimitedStringLiteral(_)
+            | Token::NationalQuoteDelimitedStringLiteral(_)
+            | Token::EscapedStringLiteral(_)
+            | Token::UnicodeStringLiteral(_)
+            | Token::HexStringLiteral(_)
+            | Token::Whitespace(
+                Whitespace::SingleLineComment { .. } | Whitespace::MultiLineComment(_)
+            )
+    )
 }
 
-/// Blank `out[from..to]` with ASCII spaces (offset-preserving).
+/// Blank `out[from..to]` with ASCII spaces (offset-preserving). **Total**: a
+/// malformed span — `to` past the end, or an inverted `from >= to` — blanks
+/// nothing rather than panicking. The masker must fail closed (over-mask or
+/// omit), never crash the render on a manifest-derived span. Today's callers
+/// pass codepoint-aligned, ordered, in-bounds offsets (`ByteIndex::byte_of`
+/// clamps to `len`; token spans are ordered), so the guards are belt-and-braces
+/// against any future caller that isn't — not a reachable path now.
 fn blank(out: &mut [u8], from: usize, to: usize) {
     let end = to.min(out.len());
+    if from >= end {
+        return;
+    }
     for b in &mut out[from..end] {
         *b = b' ';
     }
@@ -541,6 +530,31 @@ fn blank(out: &mut [u8], from: usize, to: usize) {
 mod tests {
     use super::*;
     use crate::domain::source_map::{SourceMapEntry, ZoneKind};
+
+    #[test]
+    fn blank_is_total_on_malformed_spans() {
+        // The masker must never panic on a malformed span — it fails closed.
+        // Valid range blanks exactly that range.
+        let mut valid = b"abcdef".to_vec();
+        blank(&mut valid, 2, 4);
+        assert_eq!(&valid, b"ab  ef");
+        // `to` past the end clamps to len (blanks the tail), never out-of-bounds.
+        let mut clamped = b"abcdef".to_vec();
+        blank(&mut clamped, 2, 999);
+        assert_eq!(&clamped, b"ab    ");
+        // Empty range (from == to) is a no-op.
+        let mut empty = b"abcdef".to_vec();
+        blank(&mut empty, 3, 3);
+        assert_eq!(&empty, b"abcdef");
+        // Inverted range (from > to) is a no-op, NOT a panic.
+        let mut inverted = b"abcdef".to_vec();
+        blank(&mut inverted, 4, 2);
+        assert_eq!(&inverted, b"abcdef");
+        // `from` past the end is a no-op, NOT a panic.
+        let mut past_end = b"abcdef".to_vec();
+        blank(&mut past_end, 10, 999);
+        assert_eq!(&past_end, b"abcdef");
+    }
 
     fn cte_entry(node_id: &str) -> SourceMapEntry {
         SourceMapEntry {
@@ -636,6 +650,10 @@ mod tests {
         let masked = mask_regions(raw).expect("well-formed");
         assert_eq!(masked.len(), raw.len(), "offsets preserved");
         assert!(masked.contains("select 1 "), "live SQL survives");
+        // The line comment's own terminating `\n` is PRESERVED (not blanked):
+        // the tokenizer's `SingleLineComment` span includes it, but masking it
+        // would shift every downstream span's line/col away from the true raw
+        // source, so the trailing `\n` is kept live (it carries no name).
         assert!(masked.contains("\nfrom t "), "newline + live SQL survive");
         assert!(masked.ends_with(" x"), "trailing live SQL survives");
         assert!(!masked.contains("line note"), "line comment blanked");
@@ -1416,5 +1434,79 @@ mod tests {
             .raw
             .expect("the balanced def anchors; trailing stray ) is harmless");
         assert_eq!(raw_slice(raw, &span), "stg as (select 1)");
+    }
+
+    // ── tokenizer-pass soundness contracts (cute-dbt#473) ────────────────────
+
+    #[test]
+    fn tokenizer_error_fails_closed_blanks_everything() {
+        // A `U&'…\\…'` Unicode escape-string is a TokenizerError under
+        // GenericDialect (the `\'` is not a valid hex escape). The tokenizer pass
+        // must FAIL CLOSED — blank the ENTIRE text so no interior name can ever
+        // leak as a false anchor. (Empirically verified: this exact input raises
+        // `TokenizerError` rather than a maskable token span.)
+        let raw = "select U&'pre \\' customer_id' as x from t";
+        let masked = mask_regions(raw).expect("Jinja pass is clean ⇒ Some(...)");
+        assert_eq!(masked.len(), raw.len(), "offsets preserved");
+        assert!(
+            masked.trim().is_empty(),
+            "a tokenizer error blanks the WHOLE text (fail-closed)"
+        );
+        assert!(
+            !masked.contains("customer_id") && !masked.contains("from"),
+            "nothing survives a fail-closed tokenizer error"
+        );
+    }
+
+    #[test]
+    fn tokenizer_error_omits_every_name_at_fill_layer() {
+        // End-to-end: when the tokenizer fails closed, EVERY name is omitted — a
+        // live `stg` definition included. Fail-closed never fabricates an anchor.
+        let raw = "with stg as (select U&'\\' x) select * from stg";
+        let mut sm = sm_with(vec![cte_entry("stg")]);
+        fill_raw_spans(&mut sm, raw);
+        assert!(
+            sm.entries[0].raw.is_none(),
+            "a tokenizer error blanks everything ⇒ no anchor (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn paren_inside_quoted_identifier_does_not_truncate_cte_span() {
+        // THE PROBE (cute-dbt#473): a `)` inside a quoted IDENTIFIER (`")"`, a
+        // column literally named `)`) is NOT a structural paren. The tokenizer
+        // surfaces `")"` as a quoted-identifier `Word`, which the masker blanks —
+        // so its interior `)` is removed from the paren balance and the CTE span
+        // covers its FULL extent (never the truncated `stg as (select ")`).
+        let raw = "with stg as (select \")\" as x) select * from stg";
+        let mut sm = sm_with(vec![cte_entry("stg")]);
+        fill_raw_spans(&mut sm, raw);
+        let span = sm.entries[0]
+            .raw
+            .expect("paren inside a quoted identifier is not a real close");
+        assert_eq!(raw_slice(raw, &span), "stg as (select \")\" as x)");
+    }
+
+    #[test]
+    fn unquoted_word_identifier_stays_live_and_anchors() {
+        // A BARE (unquoted) identifier `Word` is the ONE `Word` form left live —
+        // it carries the matchable name. A column uniquely named once anchors.
+        let raw = "select net_amount from raw";
+        let mut sm = sm_with(vec![column_entry("(final select)", "net_amount")]);
+        fill_raw_spans(&mut sm, raw);
+        let span = sm.entries[0].raw.expect("bare identifier anchors");
+        assert_eq!(raw_slice(raw, &span), "net_amount");
+    }
+
+    #[test]
+    fn dialect_matches_cte_engine_generic() {
+        // GUARD: the tokenizer pass must use the SAME dialect the CTE engine
+        // parses with, so raw & compiled never diverge on SQL lexing. A `$$…$$`
+        // dollar-quoted constant (a GenericDialect-recognized form) must be masked
+        // here exactly as cte_engine would lex it.
+        let raw = "select $$customer_id$$ as a, net from raw";
+        let masked = mask_regions(raw).expect("well-formed");
+        assert!(!masked.contains("customer_id"), "dollar-quote masked");
+        assert!(masked.contains("net"), "live SQL survives");
     }
 }
