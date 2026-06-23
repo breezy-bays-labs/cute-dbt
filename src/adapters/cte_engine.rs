@@ -1478,20 +1478,35 @@ fn subquery_where(query: &Query) -> Option<&Expr> {
 }
 
 /// The argument expressions of a function call — the `Expr` inside each
-/// positional / named arg, PLUS the column-bearing exprs of the trailing
-/// clauses (cute-dbt#480): the `FILTER (WHERE …)` predicate, the `OVER (…)`
-/// window spec (`PARTITION BY` + `ORDER BY` exprs), and the `WITHIN GROUP
-/// (ORDER BY …)` ordering exprs. Before #480 only `func.args` was descended,
-/// so a column referenced ONLY in one of those clauses
-/// (`row_number() OVER (PARTITION BY a.id)`, `sum(a.x) FILTER (WHERE b.flag)`)
-/// was silently dropped from lineage. Honest-direction: this ADDS the
-/// `Derived` edges for refs genuinely present in the clause — it never
-/// fabricates one. A `NamedWindow` reference (`OVER w`) names a window
-/// defined elsewhere in the `SELECT` and carries no inline exprs here, so it
-/// contributes nothing (honest absence). Wildcard args (`count(*)`, `f(t.*)`)
-/// carry no column expression and contribute nothing. Used by both the
-/// qualified-ref walker (correlation) and the CLL-3 projection walker; the
-/// CLL-3 walker's depth/complexity cap applies to these clause exprs exactly
+/// positional / named arg, PLUS the column-bearing exprs of the in-list
+/// argument clauses AND the trailing call clauses (cute-dbt#480).
+///
+/// In-list clauses (`FunctionArgumentList::clauses`, descended by
+/// [`function_arg_clause_exprs`]): the `ORDER BY` of an ordered-set
+/// aggregate (`ARRAY_AGG(a.x ORDER BY a.ts)` reads a.ts), the `BigQuery`
+/// `LIMIT` expr, the `HAVING { MAX | MIN } <expr>` bound, and the
+/// `ON OVERFLOW TRUNCATE <filler>` filler. A `SEPARATOR` (`LISTAGG(a.x,
+/// ',')`'s separator) is a literal `Value` with no column expr, so it
+/// contributes nothing — as do the `{ IGNORE | RESPECT } NULLS`, JSON
+/// `NULL`/`RETURNING` clauses. Before this slice the in-list `clauses`
+/// vec was IGNORED — only `list.args` was descended — so a column
+/// referenced only in `ORDER BY`/`LIMIT`/`HAVING` was silently dropped.
+///
+/// Trailing call clauses: the `FILTER (WHERE …)` predicate, the
+/// `OVER (…)` window spec (`PARTITION BY` + `ORDER BY` exprs), and the
+/// `WITHIN GROUP (ORDER BY …)` ordering exprs. Before #480 only
+/// `func.args` was descended, so a column referenced ONLY in one of
+/// those clauses (`row_number() OVER (PARTITION BY a.id)`,
+/// `sum(a.x) FILTER (WHERE b.flag)`) was silently dropped from lineage.
+///
+/// Honest-direction: this ADDS the `Derived` edges for refs genuinely
+/// present in the clause — it never fabricates one. A `NamedWindow`
+/// reference (`OVER w`) names a window defined elsewhere in the `SELECT`
+/// and carries no inline exprs here, so it contributes nothing (honest
+/// absence). Wildcard args (`count(*)`, `f(t.*)`) carry no column
+/// expression and contribute nothing. Used by both the qualified-ref
+/// walker (correlation) and the CLL-3 projection walker; the CLL-3
+/// walker's depth/complexity cap applies to these clause exprs exactly
 /// as it does to ordinary args.
 fn function_arg_exprs(func: &sqlparser::ast::Function) -> Vec<&Expr> {
     let mut out: Vec<&Expr> = Vec::new();
@@ -1504,6 +1519,12 @@ fn function_arg_exprs(func: &sqlparser::ast::Function) -> Vec<&Expr> {
                 _ => None,
             },
         }));
+        // In-list argument clauses — the `ORDER BY` / `LIMIT` / `HAVING` /
+        // `ON OVERFLOW` filler exprs carry real column refs the bare
+        // `list.args` descent misses (`ARRAY_AGG(x ORDER BY a.ts)`).
+        for clause in &list.clauses {
+            out.extend(function_arg_clause_exprs(clause));
+        }
     }
     // `FILTER (WHERE <predicate>)` — the predicate's column refs are real
     // inputs to the aggregate (`sum(a.x) FILTER (WHERE b.flag)` reads b.flag).
@@ -1522,6 +1543,37 @@ fn function_arg_exprs(func: &sqlparser::ast::Function) -> Vec<&Expr> {
     // (`percentile_cont(0.5) WITHIN GROUP (ORDER BY a.x)` reads a.x).
     out.extend(func.within_group.iter().map(|obe| &obe.expr));
     out
+}
+
+/// The column-bearing exprs of a single in-list function-argument clause
+/// (cute-dbt#480, gemini). Only the variants that actually carry an
+/// `Expr` contribute; the literal/marker clauses (`SEPARATOR <value>`,
+/// `{ IGNORE | RESPECT } NULLS`, the JSON `NULL`/`RETURNING` clauses)
+/// carry no column reference and yield nothing — honest absence, never a
+/// fabricated edge.
+fn function_arg_clause_exprs(clause: &sqlparser::ast::FunctionArgumentClause) -> Vec<&Expr> {
+    use sqlparser::ast::{FunctionArgumentClause, ListAggOnOverflow};
+    match clause {
+        // `ARRAY_AGG(x ORDER BY a.ts)` / `STRING_AGG(x, ',' ORDER BY a.k)`.
+        FunctionArgumentClause::OrderBy(order_by) => order_by.iter().map(|obe| &obe.expr).collect(),
+        // BigQuery `ARRAY_AGG(x LIMIT n)` — the bound is usually a literal,
+        // but descend it: a column-valued bound is a real input.
+        FunctionArgumentClause::Limit(expr) => vec![expr],
+        // BigQuery `ANY_VALUE(x HAVING MAX a.score)` — the bound expr.
+        FunctionArgumentClause::Having(bound) => vec![&bound.1],
+        // `LISTAGG(x ON OVERFLOW TRUNCATE <filler> …)` — the optional
+        // filler expr (typically a literal; descended for completeness).
+        FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Truncate { filler, .. }) => {
+            filler.as_deref().into_iter().collect()
+        }
+        // No column-bearing expr: `SEPARATOR <value>` (literal), the
+        // overflow `ERROR` form, NULL-treatment markers, JSON clauses.
+        FunctionArgumentClause::OnOverflow(ListAggOnOverflow::Error)
+        | FunctionArgumentClause::Separator(_)
+        | FunctionArgumentClause::IgnoreOrRespectNulls(_)
+        | FunctionArgumentClause::JsonNullClause(_)
+        | FunctionArgumentClause::JsonReturningClause(_) => Vec::new(),
+    }
 }
 
 /// The single projected column of a `NOT IN` inner subquery — lowercased,
@@ -4143,6 +4195,108 @@ mod tests {
                 .iter()
                 .map(|&e| (source_node(e), e.from_col.column.clone()))
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn column_lineage_array_agg_order_by_clause_collects_ref() {
+        // cute-dbt#480 (gemini HIGH): `ARRAY_AGG(a.x ORDER BY a.ts)` — the
+        // ORDER BY lives in the in-list `FunctionArgumentList::clauses`, not
+        // `func.over`/`within_group`. Before descending `list.clauses` the
+        // ordering key a.ts was silently dropped. Now BOTH the agg arg a.x
+        // AND the ORDER BY ref a.ts are Resolved Derived edges.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x, 2 AS ts) \
+             SELECT array_agg(a.x ORDER BY a.ts) AS z FROM a",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "z");
+        let from: std::collections::BTreeSet<_> = edges
+            .iter()
+            .map(|&e| (source_node(e), e.from_col.column.clone()))
+            .collect();
+        assert_eq!(
+            from,
+            [
+                ("a".to_owned(), "x".to_owned()),
+                ("a".to_owned(), "ts".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            "the agg arg a.x AND the in-list ORDER BY ref a.ts both contribute"
+        );
+        assert!(
+            edges.iter().all(|e| e.kind == ColumnEdgeKind::Derived),
+            "an ARRAY_AGG projection is Derived"
+        );
+        assert!(
+            edges
+                .iter()
+                .all(|e| e.confidence == ColumnEdgeConfidence::Resolved),
+            "single-source qualified refs are Resolved"
+        );
+    }
+
+    #[test]
+    fn column_lineage_listagg_separator_clause_is_literal_only() {
+        // cute-dbt#480 (gemini HIGH): `LISTAGG(a.x, ',')` — the `,` separator
+        // parses to a `SEPARATOR <value>` clause carrying a literal `Value`,
+        // NOT a column expr. Descending `list.clauses` must collect a.x (the
+        // arg) and fabricate NOTHING from the literal separator.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x) \
+             SELECT listagg(a.x, ',') AS z FROM a",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "z");
+        assert_eq!(
+            edges.len(),
+            1,
+            "only the agg arg a.x contributes; the literal separator yields no edge: {:?}",
+            edges
+                .iter()
+                .map(|&e| (source_node(e), e.from_col.column.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(edges[0].from_col, ColumnRef::intra("a", "x"));
+        assert_eq!(edges[0].kind, ColumnEdgeKind::Derived);
+        assert_eq!(edges[0].confidence, ColumnEdgeConfidence::Resolved);
+    }
+
+    #[test]
+    fn column_lineage_arg_clause_bare_ref_under_multi_source_is_ambiguous() {
+        // cute-dbt#480 (gemini HIGH): the honesty floor holds inside in-list
+        // arg clauses too. A BARE ORDER BY ref under a multi-relation FROM
+        // fans out to every candidate, all Ambiguous — never a wrong
+        // Resolved, never a silent drop.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS grp), b AS (SELECT 2 AS other) \
+             SELECT array_agg(a.grp ORDER BY ordk) AS z FROM a, b",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "z");
+        // The bare `ordk` ORDER BY ref fans out to both a and b (Ambiguous);
+        // the qualified arg a.grp resolves cleanly.
+        let bare: Vec<_> = edges
+            .iter()
+            .filter(|e| e.from_col.column == "ordk")
+            .collect();
+        assert_eq!(
+            bare.len(),
+            2,
+            "the bare in-list ORDER BY ref fans out to both sources: {:?}",
+            edges
+                .iter()
+                .map(|&e| (source_node(e), e.from_col.column.clone(), e.confidence))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            bare.iter()
+                .all(|e| e.confidence == ColumnEdgeConfidence::Ambiguous),
+            "a bare/ambiguous arg-clause ref degrades to Ambiguous, never a wrong Resolved"
+        );
+        let bare_sources: std::collections::BTreeSet<_> =
+            bare.iter().map(|&e| source_node(e)).collect();
+        assert_eq!(
+            bare_sources,
+            ["a".to_owned(), "b".to_owned()].into_iter().collect()
         );
     }
 
