@@ -165,4 +165,15 @@ exclude_re = [
   # MISSED). Column-precise so the killed siblings on 1075 stay gated.
   "pr_diff\\.rs:1075:91:.*replace \\+ with \\* in consume_change_block",
   "pr_diff\\.rs:911:35:.*replace && with \\|\\| in record_aligned_emphasis",
+  # cute-dbt#449 (CLL-3) — `merge_max`'s rank comparison
+  # `confidence_rank(conf) > confidence_rank(*entry)`. The `> -> >=`
+  # mutant is a CLASSIFIED EQUIVALENT: `>` and `>=` differ ONLY when the
+  # two ranks are EQUAL, and at equal rank the stored value is already
+  # identical to `conf` (`or_insert` set it), so re-assigning is a no-op —
+  # no observable behavior change, unkillable by construction. The
+  # sibling `> -> ==` and `> -> <` mutants ARE killed
+  # (column_lineage_derived_same_source_keeps_weaker_confidence proves a
+  # Resolved-then-Ambiguous merge ends Ambiguous, never a false Resolved);
+  # column-precise so those stay gated.
+  "cte_engine\\.rs:754:30:.*replace > with >= in merge_max",
 ]
