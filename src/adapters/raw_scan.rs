@@ -163,24 +163,78 @@ fn skip_ws(bytes: &[u8], from: usize) -> usize {
 }
 
 /// Balance parentheses starting at the opener `open` (a `(`); return the byte
-/// index PAST the matching `)`. `None` if unbalanced before EOF (fail-closed —
-/// the masking already blanked Jinja, so paren counting over the literal SQL is
-/// sound; a string literal containing a stray `)` is the documented S1 limit and
-/// degrades to omission, never a wrong span).
+/// index PAST the matching `)`. `None` if unbalanced before EOF (fail-closed).
+///
+/// Lexically aware over real SQL: a `(` / `)` only adjusts the paren depth when
+/// it is "live" — NOT inside a `'…'`/`"…"` string literal and NOT inside a
+/// `--`-to-EOL line comment or a `/* … */` block comment. Mirrors (and extends)
+/// the quote-tracking of [`find_expr_region_close`]:
+///
+/// - **String literals.** A stray `)` inside a quoted string (e.g.
+///   `select ')' as x`) does NOT close the CTE body early — the span is CORRECT
+///   and complete, never truncated mid-literal. The SQL doubled-quote escape is
+///   honoured: a `''` inside a `'…'` string (or `""` inside a `"…"` string)
+///   stays in-string (the doubled quote is an escaped quote char, not a
+///   close-then-reopen).
+/// - **Comments.** A SQL comment can carry a stray apostrophe (`-- new year's
+///   day`) or paren; counting those as a string-opener / paren would desync the
+///   scan. So `--`/`/* */` comment bodies are skipped wholesale. (Jinja was
+///   already masked to spaces upstream; this handles the SQL comment layer the
+///   masking never touched.)
+///
+/// With both layers skipped, paren counting over the remaining live SQL is
+/// sound.
 fn balanced_close(masked: &str, open: usize) -> Option<usize> {
     let bytes = masked.as_bytes();
+    let n = bytes.len();
     let mut depth = 0usize;
     let mut i = open;
-    while i < bytes.len() {
-        match bytes[i] {
-            b'(' => depth += 1,
-            b')' => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i + 1);
+    let mut quote: Option<u8> = None;
+    while i < n {
+        let b = bytes[i];
+        match quote {
+            Some(q) => {
+                if b == q {
+                    // A doubled quote (`''` / `""`) is an escaped quote that
+                    // stays in-string: consume both and remain quoted.
+                    if i + 1 < n && bytes[i + 1] == q {
+                        i += 1;
+                    } else {
+                        quote = None;
+                    }
                 }
             }
-            _ => {}
+            None => match b {
+                b'\'' | b'"' => quote = Some(b),
+                // `--` line comment: skip to end-of-line (a stray `'`/paren in
+                // the comment must not perturb the scan).
+                b'-' if i + 1 < n && bytes[i + 1] == b'-' => {
+                    i += 2;
+                    while i < n && bytes[i] != b'\n' {
+                        i += 1;
+                    }
+                    continue;
+                }
+                // `/* … */` block comment: skip to the closing `*/`.
+                b'/' if i + 1 < n && bytes[i + 1] == b'*' => {
+                    i += 2;
+                    while i + 1 < n && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                        i += 1;
+                    }
+                    // Past the `*/` (or EOF if unterminated — the outer loop
+                    // then exits and we fail closed via `None`).
+                    i += 2;
+                    continue;
+                }
+                b'(' => depth += 1,
+                b')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(i + 1);
+                    }
+                }
+                _ => {}
+            },
         }
         i += 1;
     }
@@ -549,5 +603,108 @@ mod tests {
         fill_raw_spans(&mut sm, raw);
         let span = sm.entries[0].raw.expect("nested parens balanced");
         assert_eq!(raw_slice(raw, &span), "stg as (select coalesce(a, (b)) )");
+    }
+
+    // ── string-literal-aware paren balancing (cute-dbt#469) ──────────────────
+
+    #[test]
+    fn stray_close_paren_inside_single_quoted_string_does_not_truncate() {
+        // The CTE body contains a `)` inside a SQL '…' string literal. Without
+        // string-awareness the balancer would close at that `)` and emit a
+        // TRUNCATED span (a false claim about where the raw CTE ends). It must
+        // skip in-string parens and span the FULL `stg as ( … )` region.
+        let raw = "with stg as (select ')' as x) select * from stg";
+        let mut sm = sm_with(vec![cte_entry("stg")]);
+        fill_raw_spans(&mut sm, raw);
+        let span = sm.entries[0]
+            .raw
+            .expect("stray ) inside a string is not a real close");
+        assert_eq!(raw_slice(raw, &span), "stg as (select ')' as x)");
+    }
+
+    #[test]
+    fn stray_close_paren_inside_double_quoted_string_does_not_truncate() {
+        // Same hazard via a double-quoted SQL identifier/string literal.
+        let raw = "with stg as (select \")\" as x) select * from stg";
+        let mut sm = sm_with(vec![cte_entry("stg")]);
+        fill_raw_spans(&mut sm, raw);
+        let span = sm.entries[0]
+            .raw
+            .expect("stray ) inside a double-quoted literal is not a real close");
+        assert_eq!(raw_slice(raw, &span), "stg as (select \")\" as x)");
+    }
+
+    #[test]
+    fn stray_open_paren_inside_string_does_not_break_balance() {
+        // A stray `(` inside a string literal must NOT inflate depth — otherwise
+        // the body would never balance and the span would be omitted (an honest
+        // omission today, but a string-aware balancer makes it a CORRECT span).
+        let raw = "with stg as (select '(' as x) select * from stg";
+        let mut sm = sm_with(vec![cte_entry("stg")]);
+        fill_raw_spans(&mut sm, raw);
+        let span = sm.entries[0]
+            .raw
+            .expect("stray ( inside a string is not a real open");
+        assert_eq!(raw_slice(raw, &span), "stg as (select '(' as x)");
+    }
+
+    #[test]
+    fn doubled_quote_escape_keeps_balancer_in_string() {
+        // The SQL doubled-quote escape: `''` inside a '…' string is an escaped
+        // quote, NOT a close-then-reopen. The `)` that follows the doubled quote
+        // is still INSIDE the string, so it must not truncate the span.
+        let raw = "with stg as (select 'a''b)' as x) select * from stg";
+        let mut sm = sm_with(vec![cte_entry("stg")]);
+        fill_raw_spans(&mut sm, raw);
+        let span = sm.entries[0]
+            .raw
+            .expect("doubled-quote escape stays in-string");
+        assert_eq!(raw_slice(raw, &span), "stg as (select 'a''b)' as x)");
+    }
+
+    #[test]
+    fn apostrophe_in_line_comment_does_not_desync_quotes() {
+        // A stray apostrophe in a `--` line comment (`year's`) must NOT be read
+        // as a string-literal opener — otherwise it flips quote parity and the
+        // body never balances. (This is the dim_date golden's exact hazard:
+        // `-- new year's day`.) The body must span its full extent.
+        let raw = "with stg as (\n  select 1 -- year's day\n) select * from stg";
+        let mut sm = sm_with(vec![cte_entry("stg")]);
+        fill_raw_spans(&mut sm, raw);
+        let span = sm.entries[0]
+            .raw
+            .expect("apostrophe in a line comment is not a string opener");
+        assert_eq!(
+            raw_slice(raw, &span),
+            "stg as (\n  select 1 -- year's day\n)"
+        );
+    }
+
+    #[test]
+    fn paren_in_line_comment_does_not_break_balance() {
+        // A stray `)` in a `--` comment must not be counted as a real close.
+        let raw = "with stg as (\n  select 1 -- a ) paren\n) select * from stg";
+        let mut sm = sm_with(vec![cte_entry("stg")]);
+        fill_raw_spans(&mut sm, raw);
+        let span = sm.entries[0]
+            .raw
+            .expect("paren in a line comment is not a real close");
+        assert_eq!(
+            raw_slice(raw, &span),
+            "stg as (\n  select 1 -- a ) paren\n)"
+        );
+    }
+
+    #[test]
+    fn apostrophe_and_paren_in_block_comment_do_not_desync() {
+        // A `/* … */` block comment carrying both a stray apostrophe and a stray
+        // `)` must be skipped wholesale.
+        let raw = "with stg as (select 1 /* don't ) */ ) select * from stg";
+        let mut sm = sm_with(vec![cte_entry("stg")]);
+        fill_raw_spans(&mut sm, raw);
+        let span = sm.entries[0]
+            .raw
+            .expect("block comment contents are skipped");
+        assert_eq!(raw_slice(raw, &span), "stg as (select 1 /* don't ) */ )");
     }
 }
