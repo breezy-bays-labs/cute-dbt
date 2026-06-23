@@ -317,11 +317,14 @@ fn jinja_close(bytes: &[u8], i: usize) -> JinjaOpen {
 ///   (`''`/`""`/`\'`, dollar-tags, prefixed `E'…'`/`U&'…'`, `N'…'`, `X'…'`,
 ///   `B'…'`, …). The single home of the SQL string-escape logic is now the
 ///   tokenizer itself (no hand-rolled escape code to drift).
-/// - A **quoted identifier** (`"my col"`, `` `my col` ``) is `Token::Word` with a
-///   `quote_style` — a LIVE name, NOT a string — and is deliberately left live so
-///   it can anchor honestly. (The old hand-rolled masker over-masked these; the
-///   tokenizer's distinction is strictly more honest, never less sound: a quoted
-///   identifier is a real definition, so anchoring it is true, not false.)
+/// - A **quoted identifier** (`"my col"`, `` `my col` ``, `")"`) is `Token::Word`
+///   with a `quote_style`. Though technically a live name, it is BLANKED in the
+///   over-mask (honest) direction — both for paren-balance soundness (a `)` inside
+///   `")"` is not a structural paren) and behavior-parity with the old masker
+///   (such names are already honestly omitted at the fill layer). See
+///   [`is_maskable_token`] for the full reasoning. An UNQUOTED `Word` (a bare
+///   identifier) is the only `Word` form left live — the only one carrying a
+///   matchable name.
 /// - A `TokenizerError` (e.g. an unterminated string, a malformed `U&'…\\…'`
 ///   unicode escape) ⇒ the WHOLE text is blanked = the maximal over-mask = sound.
 /// - A malformed `{`-led Jinja region ⇒ the WHOLE mask fails closed (`None` ⇒ the
@@ -331,7 +334,7 @@ fn jinja_close(bytes: &[u8], i: usize) -> JinjaOpen {
 ///   past itself and cannot hide a name, so leaving it live is sound.
 ///
 /// Because every uncertain case extends the masked region (or fails the whole
-/// model closed) and the only live-left forms (live SQL structure, quoted
+/// model closed) and the only live-left forms (live SQL structure, bare
 /// identifiers, lone `$`) provably carry no hidden name, under-masking is
 /// impossible — the soundness invariant holds.
 ///
@@ -351,7 +354,7 @@ fn jinja_close(bytes: &[u8], i: usize) -> JinjaOpen {
 /// | SQL string literal | `SingleQuotedString`, `EscapedStringLiteral`, `NationalStringLiteral`, `HexStringLiteral`, byte/raw/triple variants, … | `mask_sql_tokens` |
 /// | Unicode string literal | `UnicodeStringLiteral` | `mask_sql_tokens` |
 /// | Dollar-quoted string | `DollarQuotedString` | `mask_sql_tokens` |
-/// | SQL quoted identifier | `Word { quote_style: Some(_) }` | **left live** (a real name) |
+/// | SQL quoted identifier | `Word { quote_style: Some(_) }` | `mask_sql_tokens` (over-mask; see [`is_maskable_token`]) |
 ///
 /// Note `DoubleQuotedString` is enumerated too: under `GenericDialect` a `"…"`
 /// tokenizes as a quoted IDENTIFIER (`Word`), so `DoubleQuotedString` does not
