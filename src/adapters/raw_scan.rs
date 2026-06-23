@@ -509,6 +509,276 @@ fn is_maskable_token(token: &Token) -> bool {
     )
 }
 
+/// One lexically-explicit, unconditional raw CTE-to-CTE dependency
+/// (cute-dbt#471, S3): the `to` CTE's body names the `from` CTE after a bare
+/// `from`/`join` keyword in **masked** (un-templated) text. `(from, to)` are
+/// raw-CTE node ids.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct RawEdge {
+    /// The referenced sibling CTE (upstream).
+    pub from: String,
+    /// The CTE whose body names `from` (downstream).
+    pub to: String,
+}
+
+/// Scan the model's `raw` for **lexically-explicit, unconditional**
+/// CTE-to-CTE dependencies (cute-dbt#471, S3) — a bare `from <sibling>` /
+/// `join <sibling>` inside one verbatim CTE's body, where `<sibling>` is ANOTHER
+/// verbatim raw CTE of the same model. `raw_cte_spans` are the uniquely-anchored
+/// raw CTE bodies (`SourceMap::raw_node_spans`), the ONLY sound raw nodes a
+/// CTE-to-CTE edge can connect.
+///
+/// NEVER-A-FALSE-CLAIM (honesty principle 3): the scan runs over [`mask_regions`]
+/// output, where every `{{ ref() }}` / `{% for %}` / macro call / string /
+/// comment is already blanked to spaces. So a dependency mediated by any of those
+/// leaves NO live `from <name>` token and produces NO edge — the pane shows it as
+/// unresolved, never a guessed edge. Fail-closed: malformed Jinja ⇒ `mask_regions`
+/// returns `None` and the scan emits NOTHING.
+///
+/// Each emitted edge is `confidence: resolved` at the call site — the masking
+/// scan only ever yields a dependency it can prove lexically (a live, whole-word
+/// `from`/`join` keyword immediately followed by a sibling CTE id). A reference
+/// that is NOT a sibling CTE id (an external relation, a `ref()`-mediated name
+/// masked away, a column) is simply not emitted.
+pub(crate) fn explicit_cte_edges(
+    raw: &str,
+    raw_cte_spans: &std::collections::BTreeMap<String, SourceSpan>,
+) -> Vec<RawEdge> {
+    let Some(masked) = mask_regions(raw) else {
+        // Malformed Jinja ⇒ emit nothing (fail-closed).
+        return Vec::new();
+    };
+    let mut edges: Vec<RawEdge> = Vec::new();
+    for (to_id, body_span) in raw_cte_spans {
+        let range = body_span.byte_range();
+        let Some(body) = masked.get(range.clone()) else {
+            continue;
+        };
+        for referenced in from_join_referents(body) {
+            // Only a reference to ANOTHER verbatim raw CTE (a sound raw node) is
+            // an edge — a self-reference, an external relation, or a name not in
+            // the raw-CTE set is not emitted. (A CTE cannot depend on itself in
+            // standard SQL; the `to_id != referenced` guard makes that explicit.)
+            if &referenced != to_id && raw_cte_spans.contains_key(&referenced) {
+                let edge = RawEdge {
+                    from: referenced,
+                    to: to_id.clone(),
+                };
+                // De-dupe (a body may name the same sibling in both a FROM and a
+                // JOIN; the DAG carries one edge per ordered pair).
+                if !edges.contains(&edge) {
+                    edges.push(edge);
+                }
+            }
+        }
+    }
+    edges
+}
+
+/// Every identifier that immediately follows a whole-word `from` / `join`
+/// keyword in the masked CTE body `body` (cute-dbt#471, S3). The body is already
+/// masked (no strings/comments/Jinja), so every `from`/`join` here is a LIVE SQL
+/// keyword and every following word is a LIVE relation reference. ASCII
+/// case-insensitive keyword match; the referent is returned verbatim (the engine
+/// folds identifier case before the domain, so the comparison at the call site is
+/// exact).
+fn from_join_referents(body: &str) -> Vec<String> {
+    let bytes = body.as_bytes();
+    let n = bytes.len();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        // Find the start of the next identifier-or-keyword word.
+        if !is_ident_byte(bytes[i]) {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < n && is_ident_byte(bytes[i]) {
+            i += 1;
+        }
+        let word = &body[start..i];
+        if word.eq_ignore_ascii_case("from") || word.eq_ignore_ascii_case("join") {
+            // The next word (skipping whitespace) is the referenced relation. A
+            // qualified `db.schema.rel` reference is NOT a bare CTE name, so only
+            // an immediately-following bare identifier with no `.` qualifier is a
+            // sibling-CTE candidate; the call site's raw-CTE-set membership check
+            // rejects anything else.
+            let ws_end = skip_ws(bytes, i);
+            if ws_end < n && is_ident_byte(bytes[ws_end]) {
+                let rstart = ws_end;
+                let mut rend = ws_end;
+                while rend < n && is_ident_byte(bytes[rend]) {
+                    rend += 1;
+                }
+                // Reject a qualified reference (`rel.col` / `schema.rel`): a `.`
+                // immediately after the word means it is not a bare CTE name.
+                let qualified = rend < n && bytes[rend] == b'.';
+                if !qualified {
+                    out.push(body[rstart..rend].to_owned());
+                }
+                i = rend;
+            }
+        }
+    }
+    out
+}
+
+/// Derive a `{% for %}` / `{% if %}` zone's compiled **EXTENT** by BOUNDARY-
+/// ANCHORING (cute-dbt#471, S3) — the sound basis for `node_map.raw[zone]` (which
+/// compiled CTEs fall inside the loop's fan-out). A zone's `entry.compiled` is a
+/// single literal ANCHOR (`resolve_zone_compiled`), NOT its extent; the fanned
+/// CTE names (`us_sales`, `eu_sales`) are NOT verbatim in raw (only the
+/// `{{ r }}_sales` template is), so the extent must be located by the UNIQUE
+/// literal text that BOUNDS the zone in the surrounding raw:
+///
+/// - `before` = the longest literal fragment in the raw text immediately BEFORE
+///   the zone opener that occurs EXACTLY ONCE in `compiled` → the extent starts at
+///   the END of that occurrence.
+/// - `after` = the longest literal fragment immediately AFTER the zone closer that
+///   occurs EXACTLY ONCE in `compiled` → the extent ends at the START of that
+///   occurrence.
+///
+/// The extent is `[before.end, after.start)`. Sound because the boundary anchors
+/// are literal text OUTSIDE the zone (unaffected by the loop expansion), so every
+/// compiled CTE between them is the zone's observed fan-out by structural position.
+///
+/// OMIT-ON-AMBIGUOUS (never over-claim): if EITHER boundary fails to anchor
+/// uniquely (zero or multiple occurrences), returns `None` — the call site then
+/// OMITS the zone from `node_map.raw` rather than listing a CTE it cannot prove is
+/// in the zone. A zone at the very start/end of the model (no before/after
+/// literal) likewise has no anchor ⇒ `None`. A returned `Some((s, e))` with
+/// `s == e` is an honest EMPTY extent (the zone compiled to nothing between its
+/// anchors).
+pub(crate) fn zone_compiled_extent(
+    raw: &str,
+    zone_raw_span: &SourceSpan,
+    compiled: &str,
+) -> Option<(u32, u32)> {
+    let zr = zone_raw_span.byte_range();
+    if zr.start > raw.len() || zr.end > raw.len() {
+        return None;
+    }
+    // The raw text BEFORE the zone opener and AFTER the zone closer — the regions
+    // the boundary anchors are drawn from. Use the MASKED raw so a Jinja/string/
+    // comment fragment is never picked as a boundary anchor (it would not appear
+    // verbatim in compiled). Fail-closed on malformed Jinja.
+    let masked = mask_regions(raw)?;
+    let before_region = masked.get(..zr.start)?;
+    let after_region = masked.get(zr.end..)?;
+    // before-anchor: the TIGHTEST (closest-to-zone) trailing literal run of the
+    // before-region that occurs UNIQUELY in compiled — its END in compiled is the
+    // extent start. after-anchor: the tightest leading literal run of the
+    // after-region — its START in compiled is the extent end. "Tightest" so the
+    // extent does not swallow compiled CTEs that belong to a SIBLING before/after
+    // the zone (a farther anchor would over-claim membership).
+    let extent_start = boundary_anchor_end(before_region, compiled)?;
+    let extent_end = boundary_anchor_start(after_region, compiled)?;
+    if extent_start > extent_end {
+        // Inverted (the after-anchor landed before the before-anchor): the zone's
+        // surrounding literals are not a clean bracket — omit rather than claim a
+        // backwards extent.
+        return None;
+    }
+    Some((extent_start, extent_end))
+}
+
+/// The compiled byte offset where a zone's extent STARTS: the END of the UNIQUE
+/// occurrence in `compiled` of the TIGHTEST trailing literal run of the
+/// before-region (the run closest to the zone opener that anchors uniquely). Walk
+/// the before-region's trailing literal runs CLOSEST-FIRST; bind the first that
+/// occurs exactly once in compiled. Returns `None` when none anchors uniquely
+/// (omit-on-ambiguous).
+fn boundary_anchor_end(region: &str, compiled: &str) -> Option<u32> {
+    // Trailing literal runs of the masked region, closest-to-zone first. A "run"
+    // is a maximal sequence of non-whitespace bytes joined by single spaces — the
+    // shape a SQL fragment keeps after masking. We grow the candidate from the
+    // region END leftward across runs, trying the closest (shortest) viable
+    // candidate first, then widening, so the TIGHTEST unique anchor wins.
+    let runs = literal_runs(region);
+    // Build trailing candidates: [last], [last-1 .. last], … widening leftward.
+    for take in 1..=runs.len() {
+        let slice = &runs[runs.len() - take..];
+        let candidate = join_runs(region, slice);
+        if candidate.chars().filter(|c| !c.is_whitespace()).count() < 3 {
+            continue;
+        }
+        if let Some(at) = unique_match(compiled, &candidate) {
+            return u32::try_from(at + candidate.len()).ok();
+        }
+    }
+    None
+}
+
+/// The compiled byte offset where a zone's extent ENDS: the START of the UNIQUE
+/// occurrence in `compiled` of the TIGHTEST leading literal run of the
+/// after-region. Walk the after-region's leading literal runs CLOSEST-FIRST.
+/// Returns `None` when none anchors uniquely (omit-on-ambiguous).
+fn boundary_anchor_start(region: &str, compiled: &str) -> Option<u32> {
+    let runs = literal_runs(region);
+    for take in 1..=runs.len() {
+        let slice = &runs[..take];
+        let candidate = join_runs(region, slice);
+        if candidate.chars().filter(|c| !c.is_whitespace()).count() < 3 {
+            continue;
+        }
+        if let Some(at) = unique_match(compiled, &candidate) {
+            return u32::try_from(at).ok();
+        }
+    }
+    None
+}
+
+/// The `(start, end)` byte ranges of every maximal NON-WHITESPACE run in `region`
+/// (the masked text), in source order — a "literal run" is one contiguous
+/// non-whitespace token-or-symbol sequence. A candidate boundary anchor is a
+/// contiguous SLICE of these runs (the original text between the first run's start
+/// and the last run's end, single spaces included), so it matches the compiled
+/// text's own single-space glue.
+fn literal_runs(region: &str) -> Vec<(usize, usize)> {
+    let bytes = region.as_bytes();
+    let n = bytes.len();
+    let mut runs = Vec::new();
+    let mut i = 0usize;
+    while i < n {
+        if bytes[i].is_ascii_whitespace() {
+            i += 1;
+            continue;
+        }
+        let start = i;
+        while i < n && !bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        runs.push((start, i));
+    }
+    runs
+}
+
+/// The VERBATIM `region` substring spanning the first run's start through the
+/// last run's end — interior whitespace PRESERVED exactly as in the masked raw.
+/// dbt emits the literal text OUTSIDE a `{% for %}`/`{% if %}` zone verbatim into
+/// compiled (only the loop body is re-expanded), so a verbatim boundary anchor of
+/// the surrounding raw matches the compiled text byte-for-byte — collapsing
+/// whitespace would BREAK that match against compiled's multi-line indentation.
+/// `slice` is a contiguous, non-empty sub-slice of [`literal_runs`].
+fn join_runs(region: &str, slice: &[(usize, usize)]) -> String {
+    let first = slice.first().expect("non-empty slice").0;
+    let last = slice.last().expect("non-empty slice").1;
+    region[first..last].to_owned()
+}
+
+/// The byte offset of `needle` in `haystack` IFF it occurs EXACTLY ONCE; `None`
+/// for zero or multiple occurrences (the ambiguity-safe bind the zone-anchor
+/// resolution already uses, hoisted for the extent boundaries).
+fn unique_match(haystack: &str, needle: &str) -> Option<usize> {
+    let mut it = haystack.match_indices(needle);
+    let first = it.next()?;
+    if it.next().is_some() {
+        return None;
+    }
+    Some(first.0)
+}
+
 /// Blank `out[from..to]` with ASCII spaces (offset-preserving). **Total**: a
 /// malformed span — `to` past the end, or an inverted `from >= to` — blanks
 /// nothing rather than panicking. The masker must fail closed (over-mask or
@@ -1508,5 +1778,152 @@ mod tests {
         let masked = mask_regions(raw).expect("well-formed");
         assert!(!masked.contains("customer_id"), "dollar-quote masked");
         assert!(masked.contains("net"), "live SQL survives");
+    }
+
+    // ── cute-dbt#471 (S3): explicit_cte_edges + zone_compiled_extent ──────────
+
+    /// Build the raw-CTE-span map (`SourceMap::raw_node_spans` shape) by running
+    /// the real `fill_raw_spans` over `raw` for the given verbatim CTE ids.
+    fn raw_cte_spans_for(
+        raw: &str,
+        ids: &[&str],
+    ) -> std::collections::BTreeMap<String, SourceSpan> {
+        let mut sm = sm_with(ids.iter().map(|id| cte_entry(id)).collect());
+        fill_raw_spans(&mut sm, raw);
+        sm.raw_node_spans()
+    }
+
+    /// A `SourceSpan` over `[start, end)` of `text` (line/col computed honestly).
+    fn span_of(text: &str, start: u32, end: u32) -> SourceSpan {
+        crate::adapters::render::byte_span(text, start as usize, end as usize)
+            .expect("in-bounds, char-aligned span")
+    }
+
+    /// The first located zone's raw span (the real `locate_raw_zones` path, via
+    /// the test-visible fuzz shim that returns `(kind, start, end, block_id)`).
+    fn first_zone_span(raw: &str) -> SourceSpan {
+        let (_, s, e, _) = crate::adapters::render::fuzz_locate_raw_zones(raw)
+            .into_iter()
+            .next()
+            .expect("one zone located");
+        span_of(raw, s, e)
+    }
+
+    #[test]
+    fn explicit_cte_edges_emits_a_bare_from_sibling() {
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from base\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert_eq!(
+            edges,
+            vec![RawEdge {
+                from: "base".to_owned(),
+                to: "derived".to_owned()
+            }],
+            "a bare `from base` inside `derived` is one explicit edge base→derived"
+        );
+    }
+
+    #[test]
+    fn explicit_cte_edges_ignores_a_ref_mediated_dependency() {
+        // The dependency runs through `{{ ref('base') }}` (masked) ⇒ no edge.
+        let raw = "with base as (\n  select 1 as id\n),\nderived as (\n  select id from {{ ref('base') }}\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert!(
+            edges.is_empty(),
+            "a ref()-mediated dependency is masked ⇒ NO edge"
+        );
+    }
+
+    #[test]
+    fn explicit_cte_edges_ignores_a_name_in_a_string_or_comment() {
+        // `base` appears only inside a string and a comment in `derived` ⇒ no edge.
+        let raw = "with base as (\n  select 1 as id\n),\nderived as (\n  select 'from base' as n -- from base\n  , id from ext\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert!(
+            edges.is_empty(),
+            "a name only inside a string/comment is masked ⇒ not an edge endpoint"
+        );
+    }
+
+    #[test]
+    fn explicit_cte_edges_ignores_a_qualified_or_external_reference() {
+        // `from warehouse.base` (qualified) and `from external_rel` (not a sibling
+        // CTE) both produce no edge — only a bare sibling-CTE name is an edge.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from warehouse.base\n  union all select id from external_rel\n)\nselect * from derived";
+        let spans = raw_cte_spans_for(raw, &["base", "derived"]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert!(
+            edges.is_empty(),
+            "a qualified `warehouse.base` / an external relation is not a sibling-CTE edge"
+        );
+    }
+
+    #[test]
+    fn explicit_cte_edges_malformed_jinja_fails_closed() {
+        // Unbalanced Jinja ⇒ mask_regions returns None ⇒ no edges (fail-closed).
+        let raw = "with base as (select 1), derived as (select id from base {% if";
+        let spans = std::collections::BTreeMap::from([
+            ("base".to_owned(), span_of(raw, 5, 23)),
+            ("derived".to_owned(), span_of(raw, 25, 56)),
+        ]);
+        let edges = explicit_cte_edges(raw, &spans);
+        assert!(
+            edges.is_empty(),
+            "malformed Jinja ⇒ emit nothing (fail-closed)"
+        );
+    }
+
+    #[test]
+    fn zone_compiled_extent_brackets_the_fanned_ctes_soundly() {
+        // A loop bracketed by a verbatim `base` CTE (before) and `final` CTE
+        // (after): the extent spans exactly the two fanned CTEs in compiled.
+        let raw = "with base as (\n  select region from src\n),\n{% for region in ['us','eu'] %}\n{{ region }}_sales as (\n  select 1 from base\n),\n{% endfor %}\nfinal as (\n  select * from base\n)\nselect * from final";
+        let compiled = "with base as (\n  select region from src\n),\nus_sales as (\n  select 1 from base\n),\neu_sales as (\n  select 1 from base\n),\nfinal as (\n  select * from base\n)\nselect * from final";
+        // The zone raw span: locate it via the real zone scanner.
+        let zone_span = first_zone_span(raw);
+        let (ext_start, ext_end) =
+            zone_compiled_extent(raw, &zone_span, compiled).expect("a sound extent");
+        let extent = &compiled[ext_start as usize..ext_end as usize];
+        // The extent contains BOTH fanned CTE bodies and NEITHER sibling.
+        assert!(extent.contains("us_sales"), "extent covers us_sales");
+        assert!(extent.contains("eu_sales"), "extent covers eu_sales");
+        assert!(
+            !extent.contains("final as"),
+            "extent stops before the `final` sibling CTE (never swallows it)"
+        );
+    }
+
+    #[test]
+    fn zone_compiled_extent_omits_on_a_non_unique_after_anchor() {
+        // OMIT-ON-AMBIGUOUS: when the after-region's literal text is NOT unique in
+        // compiled, the extent end cannot bind ⇒ None (the caller then omits the
+        // zone, never over-claiming). We force the after-anchor non-unique by
+        // making the trailing terminal text byte-identical to an earlier region.
+        // Zone at byte [5, 40) of a raw whose after-region (`xx`) appears many
+        // times in compiled and carries no ≥3-char unique run.
+        let raw = "with {% for x in [1] %}a as (select 1){% endfor %} bb";
+        let compiled = "bb bb bb bb"; // the after-region 'bb' is non-unique
+        // Build a zone span covering the {% for %}…{% endfor %} region.
+        let zone_span = first_zone_span(raw);
+        assert!(
+            zone_compiled_extent(raw, &zone_span, compiled).is_none(),
+            "a non-unique after-anchor ⇒ None (omit-on-ambiguous, never over-claim)"
+        );
+    }
+
+    #[test]
+    fn zone_compiled_extent_omits_when_a_boundary_region_is_empty() {
+        // A zone at the very END of the model has an EMPTY after-region ⇒ no
+        // after-anchor ⇒ None (omit-on-ambiguous), never a fabricated extent.
+        let raw = "with base as (select 1)\n{% for x in [1] %}q{% endfor %}";
+        let compiled = "with base as (select 1)";
+        let zone_span = first_zone_span(raw);
+        assert!(
+            zone_compiled_extent(raw, &zone_span, compiled).is_none(),
+            "an empty after-region ⇒ None (no fabricated extent)"
+        );
     }
 }
