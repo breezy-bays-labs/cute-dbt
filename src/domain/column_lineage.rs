@@ -280,14 +280,21 @@ impl RelationIndex {
 /// reads directly (from `body_leaf_table_refs`) — the candidate `ref()`
 /// boundaries to stitch.
 ///
-/// `source_passthrough_columns` is the subset of `output_columns` whose
+/// `source_passthrough_columns` MAPS each terminal output column whose
 /// INTRA-model provenance chain is a pure pass-through/rename all the way to a
-/// leaf-reading boundary (never a `Derived`/computed dead-end). Only THESE
-/// columns are eligible for the source/seed NAME-CARRY (a non-enumerable
-/// source has no catalog, so we may only claim a downstream column originates
-/// at a source when the SQL proves it flows there unchanged — never a column
-/// computed in-model like `current_timestamp as _loaded_at`). Empty ⇒ no
-/// name-carry (the conservative never-a-false-claim direction).
+/// leaf-reading boundary (never a `Derived`/computed dead-end) TO the ORIGINAL
+/// source-side column name it reaches at that boundary (cute-dbt#450 round-4
+/// robust name-tracking). The KEY is the downstream output column; the VALUE
+/// is the real source field — equal for a same-name pass-through
+/// (`order_id → order_id`), the ORIGINAL upstream name for a rename anywhere in
+/// the chain (`order_amount → amount`, `qty → legacy_qty`). Only THESE columns
+/// are eligible for the source/seed NAME-CARRY (a non-enumerable source has no
+/// catalog, so we may only claim a downstream column originates at a source
+/// when the SQL proves it flows there — never a column computed in-model like
+/// `current_timestamp as _loaded_at`). The carry uses the VALUE as the source
+/// field, so a renamed staging column traces to the field that ACTUALLY exists
+/// — never a fabricated `source.<renamed_name>` (the never-a-false-claim
+/// floor). Empty ⇒ no name-carry.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelOutputs {
     /// The model's terminal output columns (lowercased, projection order),
@@ -295,17 +302,21 @@ pub struct ModelOutputs {
     pub output_columns: Option<Vec<String>>,
     /// The bare leaf identifiers the terminal body reads (lowercased).
     pub leaf_refs: Vec<String>,
-    /// The output columns whose intra chain is a pure pass-through/rename to a
-    /// leaf boundary — the ONLY columns eligible for the source name-carry.
-    pub source_passthrough_columns: BTreeSet<String>,
+    /// Each output column whose intra chain is a pure pass-through/rename to a
+    /// leaf boundary, mapped to the ORIGINAL source-side column name it reaches
+    /// — the ONLY columns eligible for the source name-carry, carried under the
+    /// real source field name.
+    pub source_passthrough_columns: BTreeMap<String, String>,
 }
 
 impl ModelOutputs {
     /// Canonical constructor. `source_passthrough_columns` defaults to ALL of
-    /// `output_columns` (the legacy behaviour for hand-built test fixtures
-    /// where every output is a clean pass-through); the adapter's real
-    /// extraction ([`CteGraph::model_outputs`](crate::domain::CteGraph::model_outputs))
-    /// uses [`Self::with_passthrough`] to pass the SQL-proven subset.
+    /// `output_columns` mapped to THEMSELVES (the legacy behaviour for
+    /// hand-built test fixtures where every output is a clean same-name
+    /// pass-through); the adapter's real extraction
+    /// ([`CteGraph::model_outputs`](crate::domain::CteGraph::model_outputs))
+    /// uses [`Self::with_passthrough`] to pass the SQL-proven map (each output
+    /// column → its real source field name, threading renames).
     #[must_use]
     pub fn new(output_columns: Option<Vec<String>>, leaf_refs: Vec<String>) -> Self {
         // Normalize at the boundary: the docs promise lowercased
@@ -323,7 +334,7 @@ impl ModelOutputs {
             .collect::<Vec<_>>();
         let source_passthrough_columns = output_columns
             .as_ref()
-            .map(|cols| cols.iter().cloned().collect())
+            .map(|cols| cols.iter().map(|c| (c.clone(), c.clone())).collect())
             .unwrap_or_default();
         Self {
             output_columns,
@@ -346,7 +357,7 @@ impl ModelOutputs {
     pub fn with_passthrough(
         output_columns: Option<Vec<String>>,
         leaf_refs: Vec<String>,
-        source_passthrough_columns: BTreeSet<String>,
+        source_passthrough_columns: BTreeMap<String, String>,
     ) -> Self {
         let output_columns = output_columns.map(|cols| {
             cols.into_iter()
@@ -357,10 +368,13 @@ impl ModelOutputs {
             .into_iter()
             .map(|l| l.to_ascii_lowercase())
             .collect::<Vec<_>>();
+        // Normalize BOTH the downstream key and the source-field value — a
+        // mixed-case output column or source field must not escape the
+        // lowercase contract the trace/blast lookups rely on.
         let source_passthrough_columns = source_passthrough_columns
             .into_iter()
-            .map(|c| c.to_ascii_lowercase())
-            .collect::<BTreeSet<_>>();
+            .map(|(down, source)| (down.to_ascii_lowercase(), source.to_ascii_lowercase()))
+            .collect::<BTreeMap<_, _>>();
         Self {
             output_columns,
             leaf_refs,
@@ -745,10 +759,15 @@ fn stitch_enumerable(
 /// UNCOVERED residue. We cannot enumerate a source's columns (no SQL, no
 /// catalog), but a downstream output column NOT explained by any enumerable
 /// model producer, when the model reads a single source/seed leaf, honestly
-/// originates at that source under the SAME name (a star / direct ref carries
-/// the name through — never a fabricated DIFFERENT name). With TWO source
-/// producers we cannot tell which owns the column, so we attribute to NONE
-/// (degrade — never a coin-flip).
+/// originates at that source. The cross-model edge names the REAL source field
+/// (the ORIGINAL upstream column the chain threads to — cute-dbt#450 round-4
+/// robust name-tracking): for a same-name pass-through the source field equals
+/// the downstream name; for a RENAME it is the original source column
+/// (`order_amount` ← `source.amount`, `qty` ← `source.legacy_qty`), so a
+/// renamed staging column traces to the field that actually exists — NEVER a
+/// fabricated `source.<renamed_name>`. With TWO source producers we cannot tell
+/// which owns the column, so we attribute to NONE (degrade — never a
+/// coin-flip).
 fn source_name_carry(
     downstream: &NodeId,
     mo: &ModelOutputs,
@@ -766,17 +785,17 @@ fn source_name_carry(
         if covered.contains(column) {
             continue;
         }
-        // NEVER-A-FALSE-CLAIM: only name-carry a column the SQL proves flows
-        // UNCHANGED to a leaf (pass-through/rename all the way down). A column
-        // computed in-model (`current_timestamp as _loaded_at`, a surrogate
-        // `row_number()` key) does NOT originate at the source — attributing
-        // it would be a fabricated lineage claim.
-        if !mo.source_passthrough_columns.contains(column) {
+        // NEVER-A-FALSE-CLAIM: only name-carry a column the SQL proves flows to
+        // a leaf (pass-through/rename all the way down), AND name the edge with
+        // the REAL source field the chain resolves to. A column computed
+        // in-model (`current_timestamp as _loaded_at`, a surrogate
+        // `row_number()` key) is absent from the map → no edge.
+        let Some(source_column) = mo.source_passthrough_columns.get(column) else {
             continue;
-        }
+        };
         edges.push(CrossModelEdge {
             upstream: upstream.clone(),
-            upstream_column: column.clone(),
+            upstream_column: source_column.clone(),
             downstream: downstream.clone(),
             downstream_column: column.clone(),
             via_star: true,
@@ -1319,7 +1338,9 @@ mod tests {
         round_trip(&ModelOutputs::with_passthrough(
             Some(vec!["order_id".into()]),
             vec!["raw_orders".into()],
-            ["order_id".to_string()].into_iter().collect(),
+            [("order_id".to_string(), "order_id".to_string())]
+                .into_iter()
+                .collect(),
         ));
 
         // StitchOutcome — both variants.

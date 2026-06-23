@@ -963,109 +963,210 @@ impl CteGraph {
     }
 
     /// The terminal output columns whose intra provenance is a pure
-    /// pass-through/rename chain to a leaf-reading boundary (cute-dbt#450).
+    /// pass-through/rename chain to a leaf-reading boundary, MAPPED to the
+    /// ORIGINAL source-side column name that name reaches at the boundary
+    /// (cute-dbt#450, round-4 robust name-tracking).
+    ///
+    /// The map's KEY is the terminal output column; the VALUE is the column
+    /// name on the leaf-reading boundary (the real source field). For a pure
+    /// same-name pass-through they are equal (`order_id → order_id`); for a
+    /// RENAME anywhere in the chain the value is the ORIGINAL upstream name
+    /// (`order_amount → amount`, `qty → legacy_qty`). The cross-model source
+    /// name-carry uses the VALUE as the source field, so a renamed staging
+    /// column traces to the field that actually exists — never a fabricated
+    /// `source.<renamed_name>` (the never-a-false-claim floor).
     ///
     /// `leaf_nodes` is the set of node ids that read a leaf relation (the
-    /// `ref()`/`source()` boundary — a column reaching one of these flows in
-    /// from OUTSIDE the model, so it is a genuine source-origin candidate). A
-    /// column whose chain instead dead-ends at a computed expression (a
-    /// `Derived` edge, or a node with no inbound edge that is NOT a leaf) is
-    /// EXCLUDED — never a fabricated source attribution.
+    /// `ref()`/`source()` boundary). A column whose chain dead-ends at a
+    /// computed expression (a `Derived` edge, or a node with no resolvable
+    /// inbound that is NOT a star-passthrough over a leaf) is EXCLUDED — never
+    /// a fabricated source attribution. A column whose source name cannot be
+    /// UNIQUELY resolved (a fork to two distinct source-side names) degrades to
+    /// EXCLUDED rather than guess.
     fn source_passthrough_terminal_columns(
         &self,
         terminal_node_id: &str,
         output_columns: &[String],
         leaf_nodes: &std::collections::BTreeSet<String>,
-    ) -> std::collections::BTreeSet<String> {
-        let mut reaches_leaf_memo: std::collections::HashMap<(String, String), bool> =
-            std::collections::HashMap::new();
-        output_columns
+    ) -> std::collections::BTreeMap<String, String> {
+        let cte_names: std::collections::BTreeSet<String> = self
+            .nodes
             .iter()
-            .filter(|col| {
-                self.column_reaches_leaf(
-                    terminal_node_id,
-                    col,
-                    leaf_nodes,
-                    &mut reaches_leaf_memo,
-                    0,
-                )
-            })
-            .cloned()
-            .collect()
+            .map(|n| n.name().to_ascii_lowercase())
+            .collect();
+        let mut memo: std::collections::HashMap<(String, String), Option<String>> =
+            std::collections::HashMap::new();
+        let mut out: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+        for col in output_columns {
+            if let Some(source_col) = self.resolve_leaf_column(
+                terminal_node_id,
+                col,
+                leaf_nodes,
+                &cte_names,
+                &mut memo,
+                0,
+            ) {
+                out.insert(col.clone(), source_col);
+            }
+        }
+        out
     }
 
-    /// `true` when the column `(node_id, column)` flows UNCHANGED **under the
-    /// same name** (pure pass-through only) to a leaf-reading boundary.
-    /// Memoized; depth-capped (the chain is the per-model CTE depth — finite —
-    /// but the cap guards a pathological / cyclic AST). A `Derived` inbound
-    /// edge, a `Renamed` inbound edge, or a non-leaf node with no pass-through
-    /// inbound breaks the chain (returns `false`).
+    /// Resolve the column `(node_id, column)` to the ORIGINAL source-side
+    /// column name it reaches at a leaf-reading boundary, threading the name
+    /// through every rename in the chain — or `None` when it does not reach a
+    /// leaf cleanly (a computed/`Derived` dead-end, or a non-uniquely-resolvable
+    /// fork). Memoized; depth-capped (guards a pathological / cyclic AST).
     ///
-    /// `Renamed` is EXCLUDED on purpose (cute-dbt#450, the open-fabrication
-    /// fix): the source name-carry attributes a downstream output column to its
-    /// source under the SAME name. A renamed column (`amount AS order_amount`)
-    /// is exposed downstream as `order_amount` while the source field is
-    /// `amount` — name-carrying `order_amount` would claim a `source.order_amount`
-    /// that does not exist (a Resolved trace to a fabricated source column).
-    /// Until a terminal→leaf original-column mapping exists, a renamed column
-    /// degrades to no source edge (Opaque/Root) rather than fabricate one. Only
-    /// a same-name pass-through chain proves terminal-name == leaf-name ==
-    /// carried-source-column.
-    fn column_reaches_leaf(
+    /// The resolution carries the ORIGINAL name (cute-dbt#450 round-4): a
+    /// `Renamed` edge (`legacy_qty AS qty`) is followed on its UPSTREAM column
+    /// (`legacy_qty`), so the name reaching the boundary is the real source
+    /// field — NEVER the renamed downstream name. The round-3 floor (no
+    /// fabricated source field) is preserved AND the staging-rename headline
+    /// trace-to-source is restored.
+    ///
+    /// Boundary cases:
+    /// - `(leaf_node, column)` with an explicit inbound edge from an EXTERNAL
+    ///   relation (`from` scope is not a sibling CTE): the edge's `from` column
+    ///   IS the source field (`PassThrough` → same name; `Renamed` → original
+    ///   name).
+    /// - `(leaf_node, column)` with NO explicit inbound edge: the column flowed
+    ///   in through a `select *` over the external leaf — it passes through
+    ///   UNCHANGED, so the source field is `column` itself. (A column with a
+    ///   `Derived` inbound is computed, not a star-passthrough → `None`.)
+    /// - A `Derived` / `JoinKey` / Opaque `*→*` inbound anywhere → `None`.
+    fn resolve_leaf_column(
         &self,
         node_id: &str,
         column: &str,
         leaf_nodes: &std::collections::BTreeSet<String>,
-        memo: &mut std::collections::HashMap<(String, String), bool>,
+        cte_names: &std::collections::BTreeSet<String>,
+        memo: &mut std::collections::HashMap<(String, String), Option<String>>,
         depth: u32,
-    ) -> bool {
-        // A column whose owning node is itself a leaf-reading boundary came
-        // from outside the model — a genuine source-origin candidate.
-        if leaf_nodes.contains(node_id) {
-            return true;
-        }
+    ) -> Option<String> {
         if depth > 256 {
-            return false; // pathological chain — degrade (never a false claim).
+            return None; // pathological chain — degrade (never a false claim).
         }
         let key = (node_id.to_owned(), column.to_owned());
-        if let Some(&hit) = memo.get(&key) {
-            return hit;
+        if let Some(hit) = memo.get(&key) {
+            return hit.clone();
         }
-        // Pre-seed `false` to break cycles (a column transitively feeding
-        // itself is not a clean pass-through).
-        memo.insert(key.clone(), false);
-        let mut reaches = false;
+        // Pre-seed `None` to break cycles (a column transitively feeding itself
+        // is not a clean pass-through to a leaf).
+        memo.insert(key.clone(), None);
+
+        // Fold every inbound edge defining this column into a unique resolution
+        // (or a degrade). The per-edge classification lives in
+        // `inbound_source_name`; here we only accumulate uniqueness.
+        let mut acc = LeafResolution::default();
         for edge in &self.column_edges {
-            let ColumnScope::Intra { node_id: to_node } = &edge.to_col.scope else {
-                continue;
-            };
-            if to_node != node_id || edge.to_col.column != column {
+            if !Self::edge_targets(edge, node_id, column) {
                 continue;
             }
-            // Only a SAME-NAME pass-through preserves the column name unchanged
-            // all the way to the leaf. A `Renamed` edge changes the name, so the
-            // downstream output name no longer matches the leaf/source column —
-            // name-carrying it would fabricate a source field (cute-dbt#450).
-            // A `Derived` / `Source`(Opaque `*`) / `JoinKey` edge also breaks it.
-            if !matches!(edge.kind, ColumnEdgeKind::PassThrough) {
-                continue;
-            }
-            let ColumnScope::Intra { node_id: from_node } = &edge.from_col.scope else {
-                continue;
-            };
-            if self.column_reaches_leaf(
+            acc.saw_edge = true;
+            acc.absorb(self.inbound_source_name(edge, leaf_nodes, cte_names, memo, depth));
+        }
+
+        let result = acc.into_name(column, leaf_nodes.contains(node_id));
+        memo.insert(key, result.clone());
+        result
+    }
+
+    /// `true` when `edge` is an intra-scoped edge whose target is exactly
+    /// `(node_id, column)` — the inbound edges defining this column.
+    fn edge_targets(edge: &ColumnEdge, node_id: &str, column: &str) -> bool {
+        matches!(
+            &edge.to_col.scope,
+            ColumnScope::Intra { node_id: to } if to == node_id
+        ) && edge.to_col.column == column
+    }
+
+    /// Classify ONE inbound edge to the resolution name it contributes.
+    /// `None` (degrade) for a non-intra source, a `Derived`/`JoinKey`/Opaque
+    /// `*→*` edge (the column is computed/non-enumerable here), or an upstream
+    /// recursion that itself degrades. `Some(name)` carries the ORIGINAL
+    /// source-side column name: the upstream column for a sibling-CTE recursion
+    /// (threading renames), or the external `from` column at the leaf boundary.
+    fn inbound_source_name(
+        &self,
+        edge: &ColumnEdge,
+        leaf_nodes: &std::collections::BTreeSet<String>,
+        cte_names: &std::collections::BTreeSet<String>,
+        memo: &mut std::collections::HashMap<(String, String), Option<String>>,
+        depth: u32,
+    ) -> Option<String> {
+        let ColumnScope::Intra { node_id: from_node } = &edge.from_col.scope else {
+            return None;
+        };
+        let clean = matches!(
+            edge.kind,
+            ColumnEdgeKind::PassThrough | ColumnEdgeKind::Renamed
+        ) && edge.from_col.column != "*";
+        if !clean {
+            return None;
+        }
+        if cte_names.contains(from_node) {
+            // Sibling CTE — recurse on the UPSTREAM name (rename follows its
+            // original name).
+            self.resolve_leaf_column(
                 from_node,
                 &edge.from_col.column,
                 leaf_nodes,
+                cte_names,
                 memo,
                 depth + 1,
-            ) {
-                reaches = true;
-                break;
-            }
+            )
+        } else {
+            // External leaf boundary — the `from` column IS the source field.
+            Some(edge.from_col.column.clone())
         }
-        memo.insert(key, reaches);
-        reaches
+    }
+}
+
+/// The accumulator for [`CteGraph::resolve_leaf_column`] — folds the per-edge
+/// classifications into a UNIQUE source-side name (or a degrade). Keeps the
+/// fold's branching out of the recursive function (crap4rs CC budget).
+#[derive(Default)]
+struct LeafResolution {
+    /// The unique resolved source name so far (`None` until the first clean
+    /// edge resolves).
+    name: Option<String>,
+    /// A clean edge defining this column was seen (so the "no explicit edge →
+    /// star pass-through" fallback does NOT apply).
+    saw_edge: bool,
+    /// Two distinct source-side names, or a degrading/blocking edge — the
+    /// resolution cannot be unique; degrade.
+    blocked: bool,
+}
+
+impl LeafResolution {
+    /// Absorb one edge's classification: `Some(name)` resolves (conflicting
+    /// names block); `None` blocks (a computed/non-enumerable inbound).
+    fn absorb(&mut self, candidate: Option<String>) {
+        match candidate {
+            Some(name) => match &self.name {
+                Some(prev) if *prev != name => self.blocked = true,
+                _ => self.name = Some(name),
+            },
+            None => self.blocked = true,
+        }
+    }
+
+    /// Resolve the fold to a source-side column name, or `None` to degrade.
+    /// A leaf-reading node with NO clean edge for this column flowed it in
+    /// through a `select *` over the external leaf — the source field is the
+    /// column's own (unchanged) name (a computed column would have carried a
+    /// blocking `Derived` edge instead).
+    fn into_name(self, column: &str, on_leaf_node: bool) -> Option<String> {
+        if self.blocked {
+            None
+        } else if let Some(name) = self.name {
+            Some(name)
+        } else if !self.saw_edge && on_leaf_node {
+            Some(column.to_owned())
+        } else {
+            None
+        }
     }
 }
 

@@ -250,15 +250,18 @@ fn renamed_column_trace_follows_the_rename() {
 // ---- never-a-false-claim: a COMPUTED column is NOT a source field --------
 
 #[test]
-fn computed_and_renamed_columns_are_never_attributed_to_a_source() {
+fn computed_columns_are_never_attributed_to_a_source_renames_trace_to_real_field() {
     // A staging model `select *`-ing a source, carrying TWO same-name
-    // pass-through columns (`id`, `amount`), RENAMING one (`legacy_qty AS qty`),
-    // and injecting computed columns (`current_timestamp as _loaded_at`, a
-    // surrogate `row_number()` key). Only the SAME-NAME pass-throughs may trace
-    // to the source. The computed columns and the RENAMED column must NOT —
-    // attributing them is a fabricated source field (#450 never-a-false-claim;
-    // a rename means the source field name differs from the downstream name, so
-    // `source.qty` does not exist — the source field is `legacy_qty`).
+    // pass-through columns (`id`, `amount`), RENAMING one deep in the chain
+    // (`legacy_qty AS qty`), and injecting computed columns
+    // (`current_timestamp as _loaded_at`, a surrogate `row_number()` key).
+    //
+    // ROBUST contract (cute-dbt#450 round-4): the same-name pass-throughs trace
+    // to the source under their own name; the RENAMED column traces to the
+    // source under its REAL ORIGINAL field name `legacy_qty` (NEVER the
+    // fabricated downstream name `qty`); the COMPUTED columns NEVER trace to a
+    // source. The floor — no source field that does not exist is ever named —
+    // holds in every case: `source.qty` is NEVER emitted.
     let stg = "\
 with source as (
     select * from \"db\".\"raw\".\"raw_orders\"
@@ -291,41 +294,68 @@ select * from final";
         )],
     );
     let graph = project_graph(&manifest);
-    let to_source: std::collections::BTreeSet<&str> = graph
+    let down_to_source: std::collections::BTreeSet<&str> = graph
         .edges()
         .iter()
         .filter(|e| e.upstream == nid("source.p.raw.raw_orders"))
         .map(|e| e.downstream_column.as_str())
         .collect();
+    let source_fields_named: std::collections::BTreeSet<&str> = graph
+        .edges()
+        .iter()
+        .filter(|e| e.upstream == nid("source.p.raw.raw_orders"))
+        .map(|e| e.upstream_column.as_str())
+        .collect();
     // The SAME-NAME pass-through columns reach the source.
     assert!(
-        to_source.contains("id"),
+        down_to_source.contains("id"),
         "a same-name pass-through column traces to the source"
     );
-    assert!(to_source.contains("amount"));
-    // The RENAMED column must NOT — `source.qty` does not exist (the source
-    // field is `legacy_qty`); name-carrying `qty` would fabricate it (#450).
+    assert!(down_to_source.contains("amount"));
+    // The RENAMED column NOW traces to the source under its REAL field name.
     assert!(
-        !to_source.contains("qty"),
-        "legacy_qty AS qty is a RENAME — the source field is legacy_qty, NOT qty; \
-         name-carrying qty would fabricate a source.qty"
+        down_to_source.contains("qty"),
+        "the renamed column flows to the source (robust name-tracking)"
     );
-    // The COMPUTED columns must NOT — never a fabricated source field.
     assert!(
-        !to_source.contains("_loaded_at"),
+        source_fields_named.contains("legacy_qty"),
+        "the rename names the REAL source field legacy_qty"
+    );
+    // THE FLOOR: the fabricated `source.qty` field is NEVER named.
+    assert!(
+        !source_fields_named.contains("qty"),
+        "the source field `qty` does NOT exist (real field is legacy_qty); \
+         it must NEVER be named as a source field"
+    );
+    // The COMPUTED columns must NOT reach a source under any name.
+    assert!(
+        !down_to_source.contains("_loaded_at"),
         "current_timestamp as _loaded_at is computed in-model — NOT a source field"
     );
     assert!(
-        !to_source.contains("order_key"),
+        !down_to_source.contains("order_key"),
         "a surrogate row_number() key is computed in-model — NOT a source field"
     );
-    // And the computed + renamed columns' traces terminate honestly (NOT Source).
-    for col in ["_loaded_at", "qty"] {
+    // The renamed column traces to source under legacy_qty; the computed
+    // columns never claim a source origin.
+    let qty_trace = graph.trace_to_source(&manifest, &nid("model.p.stg_orders"), "qty");
+    assert_eq!(
+        qty_trace.termination,
+        TraceTermination::Source,
+        "the renamed column traces all the way to its REAL source field"
+    );
+    let qty_last = qty_trace.hops.last().expect("non-empty trace");
+    assert_eq!(qty_last.node, nid("source.p.raw.raw_orders"));
+    assert_eq!(
+        qty_last.column, "legacy_qty",
+        "the source hop names the REAL field legacy_qty, never qty"
+    );
+    for col in ["_loaded_at", "order_key"] {
         let trace = graph.trace_to_source(&manifest, &nid("model.p.stg_orders"), col);
         assert_ne!(
             trace.termination,
             TraceTermination::Source,
-            "a computed/renamed column ({col}) never claims a source origin"
+            "a computed column ({col}) never claims a source origin"
         );
     }
 }
@@ -639,19 +669,18 @@ fn exposed_column_still_gets_its_cross_model_edge_after_narrowing() {
     );
 }
 
-// ---- never-a-false-claim: a RENAMED column is NOT a same-name source field
-// (cute-dbt#450 round-3, the open-fabrication fix). `amount AS order_amount`
-// over a source: the source field is `amount`, the downstream output is
-// `order_amount`. The source name-carry must NOT fabricate a
-// `source.order_amount` (a Resolved trace to a source column that does not
-// exist). A renamed column degrades (no source edge) until a terminal→leaf
-// original-column mapping exists. A pure pass-through (same name both sides)
-// STILL traces correctly.
+// ---- never-a-false-claim: a RENAMED column names its REAL source field
+// (cute-dbt#450 round-4, ROBUST name-tracking). `amount AS order_amount` over a
+// source: the source field is `amount`, the downstream output is
+// `order_amount`. The robust source name-carry traces `order_amount` to the
+// REAL field `amount` — NEVER fabricates a `source.order_amount` (a source
+// column that does not exist). A pure pass-through (same name both sides) STILL
+// traces correctly.
 
 /// stg `select id as order_id, amount as order_amount from <source>`: BOTH
 /// outputs are RENAMES of the source fields (id→order_id, amount→order_amount).
-/// The source is referenced directly (not a `select *`), so there is no clean
-/// pass-through column — neither output may name-carry to the source.
+/// The source is referenced directly (not a `select *`); the robust chain
+/// name-tracking carries each ORIGINAL source-field name through the rename.
 fn rename_over_source_manifest() -> Manifest {
     let stg = "select id as order_id, amount as order_amount \
                from \"db\".\"raw\".\"raw_orders\"";
@@ -672,37 +701,29 @@ fn rename_over_source_manifest() -> Manifest {
 }
 
 #[test]
-fn renamed_column_does_not_fabricate_a_same_name_source_field() {
+fn renamed_column_traces_to_its_real_source_field_never_a_fabricated_name() {
     let manifest = rename_over_source_manifest();
     let graph = project_graph(&manifest);
 
-    // NO cross-model edge attributes a renamed output column to the source
-    // under that downstream name — `source.order_amount` does not exist.
+    // The renamed output column traces to the source under its REAL field name
+    // (order_amount → amount), and NEVER under the fabricated downstream name.
+    assert_rename_traces_to_real_source(
+        &graph,
+        &manifest,
+        "model.p.stg_orders",
+        "order_amount",
+        "amount",
+        "source.p.raw.raw_orders",
+    );
+
+    // THE FLOOR: no edge ever names the fabricated `source.order_amount` field.
     let fabricated = graph.edges().iter().any(|e| {
-        e.upstream == nid("source.p.raw.raw_orders")
-            && (e.downstream_column == "order_amount" || e.upstream_column == "order_amount")
+        e.upstream == nid("source.p.raw.raw_orders") && e.upstream_column == "order_amount"
     });
     assert!(
         !fabricated,
-        "a renamed column (amount AS order_amount) must NOT fabricate a \
-         source.order_amount edge — the source field is `amount`, not `order_amount`"
-    );
-
-    // And trace_to_source for the renamed column does NOT claim a source origin
-    // named order_amount: it degrades (Root/Opaque), never a Resolved
-    // fabrication.
-    let trace = graph.trace_to_source(&manifest, &nid("model.p.stg_orders"), "order_amount");
-    assert_ne!(
-        trace.termination,
-        TraceTermination::Source,
-        "a renamed column never claims a (fabricated) same-name source origin"
-    );
-    assert!(
-        trace
-            .hops
-            .iter()
-            .all(|h| !(h.node == nid("source.p.raw.raw_orders") && h.column == "order_amount")),
-        "the trace fabricates no source.order_amount hop for a renamed column"
+        "the source field `order_amount` does not exist (real field is `amount`); \
+         it must NEVER be named as a source field"
     );
 }
 
@@ -871,5 +892,351 @@ select a.order_id, b.b_val from a join b on a.order_id = b.order_id";
             .iter()
             .all(|e| !(e.downstream == nid("model.p.dim") && e.downstream_column == "a_val")),
         "the narrowed-away a_val produces no phantom cross-model edge"
+    );
+}
+
+// ---- ROBUST rename name-tracking (cute-dbt#450 round-4) -------------------
+// The open-fabrication class the conservative round-3 floor could not close:
+// a column RENAMED *in the leaf-reading CTE itself* (the canonical dbt staging
+// shape `renamed as (select legacy_qty as qty from {{source}}) select qty from
+// renamed`). Round-3's `column_reaches_leaf` early-returned `true` the moment
+// it reached the leaf-reading node — BEFORE inspecting the inbound edge name —
+// so `qty` entered source-name-carry under its RENAMED name and emitted
+// `source.raw_orders.qty` (a Resolved trace to a source field that does not
+// exist; the real field is `legacy_qty`). The robust fix CARRIES the original
+// source column name through the chain: the trace now terminates at the REAL
+// source field, `legacy_qty`, NEVER `qty`. The floor is unchanged — no trace
+// ever names a source field that does not exist.
+
+/// Assert: the renamed downstream column traces to the source under its REAL
+/// (original) source-field name `expect_source_col`, and NEVER under the
+/// fabricated downstream name `forbidden`.
+fn assert_rename_traces_to_real_source(
+    graph: &ProjectColumnGraph,
+    manifest: &Manifest,
+    model_id: &str,
+    down_col: &str,
+    expect_source_col: &str,
+    source_id: &str,
+) {
+    // The cross-model edge attributes the renamed downstream column to the
+    // source under the ORIGINAL source-field name (upstream_column), with the
+    // downstream name on the downstream side.
+    let edge = graph.edges().iter().find(|e| {
+        e.upstream == nid(source_id)
+            && e.downstream == nid(model_id)
+            && e.downstream_column == down_col
+    });
+    let edge = edge.unwrap_or_else(|| {
+        panic!("{model_id}.{down_col} must carry a sound source edge to {source_id}")
+    });
+    assert_eq!(
+        edge.upstream_column, expect_source_col,
+        "the source edge names the REAL source field ({expect_source_col}), \
+         never the renamed downstream name ({down_col})"
+    );
+    // NEVER a fabricated source field under the downstream (renamed) name. Only
+    // meaningful when the rename actually changed the name — a genuine same-name
+    // pass-through legitimately names the source field under the shared name.
+    if down_col != expect_source_col {
+        assert!(
+            graph
+                .edges()
+                .iter()
+                .all(|e| !(e.upstream == nid(source_id) && e.upstream_column == down_col)),
+            "no source edge ever names the fabricated field {source_id}.{down_col}"
+        );
+    }
+    // The trace terminates at the source, and its LAST hop names the REAL field.
+    let trace = graph.trace_to_source(manifest, &nid(model_id), down_col);
+    assert_eq!(
+        trace.termination,
+        TraceTermination::Source,
+        "{model_id}.{down_col} traces all the way to its source field (the headline)"
+    );
+    let last = trace.hops.last().expect("a non-empty trace");
+    assert_eq!(last.node, nid(source_id));
+    assert_eq!(
+        last.column, expect_source_col,
+        "the source hop names the REAL field {expect_source_col}, never {down_col}"
+    );
+    // And NO hop anywhere fabricates the source.<down_col> field (only when the
+    // rename changed the name — a same-name pass-through shares the name).
+    if down_col != expect_source_col {
+        assert!(
+            trace
+                .hops
+                .iter()
+                .all(|h| !(h.node == nid(source_id) && h.column == down_col)),
+            "the trace never fabricates a {source_id}.{down_col} hop"
+        );
+    }
+}
+
+#[test]
+fn rename_in_leaf_reading_cte_traces_to_the_real_source_field() {
+    // THE round-4 bug shape: the rename happens INSIDE the CTE that reads the
+    // source directly. `renamed` reads {{source}} (a leaf-reading boundary) and
+    // renames `legacy_qty as qty`; the terminal passes `qty` through. The trace
+    // must reach source.raw_orders.legacy_qty — NEVER source.raw_orders.qty.
+    let stg = "\
+with renamed as (
+    select legacy_qty as qty from \"db\".\"raw\".\"raw_orders\"
+)
+select qty from renamed";
+    let manifest = manifest_of(
+        vec![model(
+            "model.p.stg_orders",
+            "\"db\".\"staging\".\"stg_orders\"",
+            stg,
+            &["source.p.raw.raw_orders"],
+        )],
+        vec![source(
+            "source.p.raw.raw_orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"raw_orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+    assert_rename_traces_to_real_source(
+        &graph,
+        &manifest,
+        "model.p.stg_orders",
+        "qty",
+        "legacy_qty",
+        "source.p.raw.raw_orders",
+    );
+}
+
+#[test]
+fn direct_terminal_rename_traces_to_the_real_source_field() {
+    // The terminal itself reads the source directly and renames: `select amount
+    // as order_amount from {{source}}`. order_amount traces to source.amount.
+    let manifest = rename_over_source_manifest();
+    let graph = project_graph(&manifest);
+    assert_rename_traces_to_real_source(
+        &graph,
+        &manifest,
+        "model.p.stg_orders",
+        "order_amount",
+        "amount",
+        "source.p.raw.raw_orders",
+    );
+    assert_rename_traces_to_real_source(
+        &graph,
+        &manifest,
+        "model.p.stg_orders",
+        "order_id",
+        "id",
+        "source.p.raw.raw_orders",
+    );
+}
+
+#[test]
+fn multi_hop_passthrough_above_a_rename_traces_to_the_real_source_field() {
+    // The rename is at the leaf, and SEVERAL pure pass-through hops sit above
+    // it. The original source name must survive every hop.
+    let stg = "\
+with renamed as (
+    select legacy_qty as qty from \"db\".\"raw\".\"raw_orders\"
+),
+mid as (
+    select qty from renamed
+),
+top as (
+    select qty from mid
+)
+select qty from top";
+    let manifest = manifest_of(
+        vec![model(
+            "model.p.stg_orders",
+            "\"db\".\"staging\".\"stg_orders\"",
+            stg,
+            &["source.p.raw.raw_orders"],
+        )],
+        vec![source(
+            "source.p.raw.raw_orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"raw_orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+    assert_rename_traces_to_real_source(
+        &graph,
+        &manifest,
+        "model.p.stg_orders",
+        "qty",
+        "legacy_qty",
+        "source.p.raw.raw_orders",
+    );
+}
+
+#[test]
+fn chained_rename_traces_to_the_first_original_source_field() {
+    // a → b → c: `legacy_qty as a` at the leaf, then `a as b`, then `b as c`.
+    // The downstream output is `c`; the real source field is `legacy_qty`.
+    // Every link is a rename — the original name must survive the whole chain,
+    // and `c`/`b`/`a` must NEVER be fabricated as source fields.
+    let stg = "\
+with leaf as (
+    select legacy_qty as a from \"db\".\"raw\".\"raw_orders\"
+),
+relabel1 as (
+    select a as b from leaf
+),
+relabel2 as (
+    select b as c from relabel1
+)
+select c from relabel2";
+    let manifest = manifest_of(
+        vec![model(
+            "model.p.stg_orders",
+            "\"db\".\"staging\".\"stg_orders\"",
+            stg,
+            &["source.p.raw.raw_orders"],
+        )],
+        vec![source(
+            "source.p.raw.raw_orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"raw_orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+    assert_rename_traces_to_real_source(
+        &graph,
+        &manifest,
+        "model.p.stg_orders",
+        "c",
+        "legacy_qty",
+        "source.p.raw.raw_orders",
+    );
+    // No intermediate rename name is ever fabricated as a source field.
+    for fabricated in ["a", "b", "c"] {
+        assert!(
+            graph
+                .edges()
+                .iter()
+                .all(|e| !(e.upstream == nid("source.p.raw.raw_orders")
+                    && e.upstream_column == fabricated)),
+            "no source edge ever names the intermediate rename {fabricated} as a source field"
+        );
+    }
+}
+
+#[test]
+fn star_over_a_renaming_leaf_cte_traces_to_the_real_source_field() {
+    // `select *` over a CTE that renamed at the leaf. The star carries the
+    // post-rename name (`qty`) forward; the trace must still reach the REAL
+    // source field `legacy_qty`, never `qty`.
+    let stg = "\
+with renamed as (
+    select legacy_qty as qty from \"db\".\"raw\".\"raw_orders\"
+)
+select * from renamed";
+    let manifest = manifest_of(
+        vec![model(
+            "model.p.stg_orders",
+            "\"db\".\"staging\".\"stg_orders\"",
+            stg,
+            &["source.p.raw.raw_orders"],
+        )],
+        vec![source(
+            "source.p.raw.raw_orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"raw_orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+    assert_rename_traces_to_real_source(
+        &graph,
+        &manifest,
+        "model.p.stg_orders",
+        "qty",
+        "legacy_qty",
+        "source.p.raw.raw_orders",
+    );
+}
+
+#[test]
+fn same_name_passthrough_over_source_still_names_the_correct_source_field() {
+    // Regression: a genuine SAME-NAME pass-through still carries the correct
+    // (identical) source field name — the robust name-tracking does not perturb
+    // the clean case.
+    let stg = "select order_id from \"db\".\"raw\".\"raw_orders\"";
+    let manifest = manifest_of(
+        vec![model(
+            "model.p.stg_orders",
+            "\"db\".\"staging\".\"stg_orders\"",
+            stg,
+            &["source.p.raw.raw_orders"],
+        )],
+        vec![source(
+            "source.p.raw.raw_orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"raw_orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+    assert_rename_traces_to_real_source(
+        &graph,
+        &manifest,
+        "model.p.stg_orders",
+        "order_id",
+        "order_id",
+        "source.p.raw.raw_orders",
+    );
+}
+
+#[test]
+fn computed_column_on_a_leaf_reading_node_never_traces_to_source() {
+    // A computed column projected DIRECTLY in the leaf-reading node
+    // (`current_timestamp as _loaded_at from {{source}}`) must NOT resolve to a
+    // source field — it has no source provenance at all. The robust resolution
+    // must not over-claim just because the node reads a leaf.
+    let stg = "select order_id, current_timestamp as _loaded_at \
+               from \"db\".\"raw\".\"raw_orders\"";
+    let manifest = manifest_of(
+        vec![model(
+            "model.p.stg_orders",
+            "\"db\".\"staging\".\"stg_orders\"",
+            stg,
+            &["source.p.raw.raw_orders"],
+        )],
+        vec![source(
+            "source.p.raw.raw_orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"raw_orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+    // order_id (a real pass-through) DOES trace to source.
+    assert_rename_traces_to_real_source(
+        &graph,
+        &manifest,
+        "model.p.stg_orders",
+        "order_id",
+        "order_id",
+        "source.p.raw.raw_orders",
+    );
+    // _loaded_at NEVER does.
+    assert!(
+        graph
+            .edges()
+            .iter()
+            .all(|e| !(e.upstream == nid("source.p.raw.raw_orders")
+                && e.downstream_column == "_loaded_at")),
+        "a computed column on a leaf-reading node fabricates no source edge"
+    );
+    let trace = graph.trace_to_source(&manifest, &nid("model.p.stg_orders"), "_loaded_at");
+    assert_ne!(
+        trace.termination,
+        TraceTermination::Source,
+        "current_timestamp as _loaded_at never claims a source origin"
     );
 }
