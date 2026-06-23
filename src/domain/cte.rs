@@ -830,6 +830,80 @@ impl CteGraph {
     pub fn is_empty(&self) -> bool {
         self.nodes.is_empty()
     }
+
+    /// Derive this model's CROSS-MODEL facts (cute-dbt#450, CLL-4) — its
+    /// terminal OUTPUT columns and the bare leaf relations it reads — from the
+    /// already-resolved intra-model column edges (never a second parse). The
+    /// cross-model builder
+    /// ([`ProjectColumnGraph::build`](crate::domain::column_lineage::ProjectColumnGraph::build))
+    /// consumes these.
+    ///
+    /// `terminal_node_id` is the engine's terminal-select node name
+    /// (`cte_engine::TERMINAL_NODE_NAME`) — passed in so the domain stays
+    /// decoupled from the adapter constant.
+    ///
+    /// Output columns are the `to_col.column`s of every edge landing on the
+    /// terminal node, in first-seen (edge) order, de-duplicated. The terminal
+    /// projection is NON-ENUMERABLE (`output_columns = None`) when it carries
+    /// an Opaque star — an edge onto the terminal whose `from_col.column` is
+    /// `"*"` with `Opaque` confidence (a `SELECT *` over an unknown external
+    /// relation the resolver could not expand). This is the honest
+    /// project-wide output map: a model whose own output can't be enumerated
+    /// can't have a downstream star expanded over it (no fabricated names).
+    #[must_use]
+    pub fn model_outputs(
+        &self,
+        terminal_node_id: &str,
+    ) -> crate::domain::column_lineage::ModelOutputs {
+        let is_terminal = |scope: &ColumnScope| matches!(scope, ColumnScope::Intra { node_id } if node_id == terminal_node_id);
+        // Non-enumerable iff an Opaque `*` edge lands on the terminal node.
+        let opaque_terminal = self.column_edges.iter().any(|e| {
+            is_terminal(&e.to_col.scope)
+                && e.from_col.column == "*"
+                && e.confidence == ColumnEdgeConfidence::Opaque
+        });
+        let output_columns = if opaque_terminal {
+            None
+        } else {
+            let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+            let mut cols: Vec<String> = Vec::new();
+            for edge in &self.column_edges {
+                if is_terminal(&edge.to_col.scope) && seen.insert(edge.to_col.column.clone()) {
+                    cols.push(edge.to_col.column.clone());
+                }
+            }
+            // A terminal that produced no resolvable edges at all is honestly
+            // non-enumerable (we could not name a single output column).
+            if cols.is_empty() { None } else { Some(cols) }
+        };
+        // Every bare leaf the model reads across all bodies — the candidate
+        // `ref()`/`source()` boundaries. The cross-model builder constrains
+        // these to the model's REAL `depends_on` producers, so an intra-model
+        // CTE alias appearing here can never mis-stitch.
+        let mut leaf_seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut leaf_refs: Vec<String> = Vec::new();
+        for node in &self.nodes {
+            for leaf in node.body_leaf_table_refs() {
+                if leaf_seen.insert(leaf.clone()) {
+                    leaf_refs.push(leaf.clone());
+                }
+            }
+        }
+        // A WITH-less model (e.g. `select * from "db"."s"."upstream"`) has NO
+        // CTE nodes, so `body_leaf_table_refs` are absent — but the Opaque /
+        // expanded star edges still carry the source leaf as the `from_col`
+        // scope node id. Recover those leaves so a flat downstream model still
+        // stitches across the `ref()` boundary.
+        for edge in &self.column_edges {
+            if let ColumnScope::Intra { node_id } = &edge.from_col.scope
+                && node_id != terminal_node_id
+                && leaf_seen.insert(node_id.clone())
+            {
+                leaf_refs.push(node_id.clone());
+            }
+        }
+        crate::domain::column_lineage::ModelOutputs::new(output_columns, leaf_refs)
+    }
 }
 
 #[cfg(test)]

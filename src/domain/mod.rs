@@ -39,6 +39,7 @@ pub mod cell_diff;
 pub mod check_config;
 pub mod checks;
 pub mod column_context;
+pub mod column_lineage;
 pub mod config;
 pub mod cte;
 pub mod experimental;
@@ -84,6 +85,10 @@ pub use checks::{
     resolve_supersedes, supersedes_is_acyclic,
 };
 pub use column_context::{ColumnContext, SINGULAR_KIND, TestFact, column_contexts};
+pub use column_lineage::{
+    CrossModelEdge, ModelOutputs, NormalizedRelation, ProjectColumnGraph, RelationIndex,
+    StitchOutcome, TraceHop, TraceTermination, TraceToSource, parse_relation_name,
+};
 pub use config::{
     AnalysisConfig, DEFAULT_REPORT_TITLE, DEFAULT_SEED_ROW_CAP, PrConfig, PrRef, ReportConfig,
     SeedsConfig,

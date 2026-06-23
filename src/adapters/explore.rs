@@ -50,11 +50,13 @@ use crate::adapters::asset_embed::{
     APPEARANCE_JS, CYTOSCAPE_DAGRE_JS, CYTOSCAPE_JS, EXPLORE_CTE_JS, EXPLORE_LINEAGE_JS,
     EXPLORE_TESTS_JS, FAVICON_DATA_URI, SAKURA_CSS,
 };
+use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::adapters::render::{DagPayload, ReportPayload};
 use crate::domain::{
-    ConfigProvenance, FixtureTable, GrainKind, MacroFocusSet, Manifest, ModelInScopeSet, Node,
-    NodeId, ProjectFacts, SeedCard, SourceNode, VarInventory, VarInventoryEntry, VarScanFootprint,
-    model_grain_signals, project_var_inventory, resolve_model_configs, resolve_tested_model,
+    ConfigProvenance, FixtureTable, GrainKind, MacroFocusSet, Manifest, ModelInScopeSet,
+    ModelLineage, ModelOutputs, Node, NodeId, ProjectColumnGraph, ProjectFacts, RelationIndex,
+    SeedCard, SourceNode, VarInventory, VarInventoryEntry, VarScanFootprint, model_grain_signals,
+    project_var_inventory, resolve_model_configs, resolve_tested_model,
 };
 use serde_json::Value;
 
@@ -808,6 +810,53 @@ pub struct LineagePayload {
     /// `var:`/`macro:` reference filter.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub project_pane: Option<ProjectPanePayload>,
+    /// The project-wide CROSS-MODEL column lineage graph (cute-dbt#450,
+    /// CLL-4) — the explorer's `FullProject` compute envelope. Built ONLY in
+    /// the explorer arm by running the intra resolver over EVERY model and
+    /// stitching at `ref()` boundaries on a normalized
+    /// `(database, schema, identifier)` join key. Carries the stitched
+    /// cross-model edges + the per-model output-column map (the
+    /// catalog-equivalent) so the client can render trace-to-source (C) and
+    /// downstream blast-radius (B) at column grain. A SIDE FIELD on the
+    /// carrier (the `config_provenance` precedent), `None`/empty when no
+    /// cross-model column flow is statically recoverable ⇒ serde-skips ⇒ a
+    /// flow-free explore golden stays byte-identical. The report path NEVER
+    /// builds this (scope-as-parameter): the project graph is the explorer's
+    /// envelope alone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cross_model_columns: Option<CrossModelColumnsPayload>,
+}
+
+/// The serialized project-wide cross-model column lineage (cute-dbt#450) —
+/// the explorer-only carrier for affordances B (blast-radius) and C
+/// (trace-to-source) at column grain. A thin render-layer projection of the
+/// domain [`ProjectColumnGraph`]: the
+/// stitched cross-model edges + the per-model output-column map. The client
+/// walks the edge set to render trace/impact in place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CrossModelColumnsPayload {
+    /// Every stitched cross-model column edge, in deterministic order.
+    pub edges: Vec<CrossModelEdgePayload>,
+    /// Per-model terminal output columns (the project-wide catalog-equivalent)
+    /// — node id → its output columns. A model with a non-enumerable output
+    /// (`*` over an unknown external) is omitted (the honest gap).
+    pub outputs: BTreeMap<String, Vec<String>>,
+}
+
+/// One serialized cross-model column edge — an upstream model's output column
+/// flowing into a downstream model over a `ref()` boundary.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct CrossModelEdgePayload {
+    /// The upstream (producer) model node id.
+    pub upstream: String,
+    /// The upstream column.
+    pub upstream_column: String,
+    /// The downstream (consumer) model node id.
+    pub downstream: String,
+    /// The downstream column the upstream column flows into.
+    pub downstream_column: String,
+    /// `true` when the edge came through a `SELECT *` over the upstream.
+    pub via_star: bool,
 }
 
 /// The explore project pane (cute-dbt#270, epic #262 C-arc): project
@@ -1082,7 +1131,68 @@ fn lineage_payload_from(
         seed_tables: BTreeMap::new(),
         config_provenance: BTreeMap::new(),
         project_pane: None,
+        cross_model_columns: None,
     }
+}
+
+/// Build the project-wide CROSS-MODEL column lineage graph (cute-dbt#450,
+/// CLL-4) — the EXPLORER's `FullProject` compute envelope.
+///
+/// This is the scope-as-parameter boundary made concrete: it runs the intra
+/// resolver ([`parse_cte_graph`]) over EVERY model's `compiled_code` (all
+/// models carry it), derives each model's terminal output columns + leaf refs
+/// ([`CteGraph::model_outputs`](crate::domain::CteGraph::model_outputs)), and
+/// hands them to the pure-domain [`ProjectColumnGraph::build`] along with the
+/// ingestion-built [`RelationIndex`] (the normalized join key) and
+/// [`ModelLineage`] (`DagFacts.lineage`, the authoritative producer set). The
+/// REPORT path never calls this — the project graph lives only here.
+///
+/// Returns `None` when no cross-model column flow is statically recoverable
+/// (no enumerable edges) so the carrier serde-skips and a flow-free explore
+/// golden stays byte-identical.
+///
+/// Public so the cross-model integration test exercises this EXPLORER-only
+/// seam over a real multi-model manifest (scope-as-parameter — the report path
+/// never reaches it).
+#[must_use]
+pub fn build_cross_model_columns(current: &Manifest) -> Option<CrossModelColumnsPayload> {
+    let index = RelationIndex::from_manifest(current);
+    let lineage = ModelLineage::from_manifest(current);
+    // Run the intra resolver over EVERY model (the FullProject envelope).
+    let mut model_outputs: BTreeMap<NodeId, ModelOutputs> = BTreeMap::new();
+    for (id, node) in current.nodes() {
+        if node.resource_type() != "model" {
+            continue;
+        }
+        let Some(compiled) = node.compiled_code() else {
+            continue; // not compiled — no SQL to resolve (fail-open).
+        };
+        let Ok(graph) = parse_cte_graph(compiled) else {
+            continue; // unparseable — honest absence, never a fabricated map.
+        };
+        model_outputs.insert(id.clone(), graph.model_outputs(TERMINAL_NODE_NAME));
+    }
+    let graph = ProjectColumnGraph::build(current, &lineage, &index, &model_outputs);
+    if graph.edges().is_empty() {
+        return None;
+    }
+    let edges = graph
+        .edges()
+        .iter()
+        .map(|e| CrossModelEdgePayload {
+            upstream: e.upstream.as_str().to_owned(),
+            upstream_column: e.upstream_column.clone(),
+            downstream: e.downstream.as_str().to_owned(),
+            downstream_column: e.downstream_column.clone(),
+            via_star: e.via_star,
+        })
+        .collect();
+    let outputs = graph
+        .outputs()
+        .iter()
+        .filter_map(|(id, cols)| cols.as_ref().map(|c| (id.as_str().to_owned(), c.clone())))
+        .collect();
+    Some(CrossModelColumnsPayload { edges, outputs })
 }
 
 /// Build the focused-macro lineage payload for `macro.html` (cute-dbt#345
@@ -1733,6 +1843,11 @@ pub fn render_explore(
     // ⇒ omitted from JSON ⇒ the seed-free `dag.html` golden stays
     // byte-identical (the serde-skip on `seed_tables`).
     lineage.seed_tables = seed_tables_by_id(seed_cards, seed_row_cap);
+    // cute-dbt#450 (CLL-4) — the project-wide cross-model column lineage,
+    // built ONLY here (the explorer's FullProject envelope; the report path
+    // never constructs it — scope-as-parameter). `None`/empty ⇒ serde-skipped,
+    // so a flow-free explore golden stays byte-identical.
+    lineage.cross_model_columns = build_cross_model_columns(current);
     let not_compiled_count = lineage.nodes.iter().filter(|n| n.not_compiled).count();
     // The marked-node count (what actually renders), not `changed.len()`
     // — a defensive id outside the model set must not inflate the banner.

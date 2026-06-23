@@ -39,6 +39,16 @@ pattern ="src/adapters/cte_engine.rs"
 threshold = 15
 
 [[overrides]]
+# THE cross-model column join (cute-dbt#450, CLL-4) — the normalized
+# (database, schema, identifier) join key + the producer-gated stitch
+# (`stitch_leaf`) + the trace-to-source / blast-radius walks. The
+# never-a-false-claim seam: a mis-built join key or an un-gated stitch
+# silently attributes a column to the WRONG upstream (a false lineage
+# claim), never a crash — correctness-load-bearing, strict.
+pattern ="src/domain/column_lineage.rs"
+threshold = 15
+
+[[overrides]]
 # THE position/span vocabulary — the half-open byte primitives
 # (contains/contains_byte/contains_range/overlaps) + the empty-span guard
 # (cute-dbt#444). Off-by-one / underflow bugs here silently mis-bind a zone
