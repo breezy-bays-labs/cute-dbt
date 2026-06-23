@@ -94,8 +94,9 @@ pub use config::{
     SeedsConfig,
 };
 pub use cte::{
-    ColumnEdge, ColumnEdgeConfidence, ColumnEdgeKind, ColumnRef, ColumnScope, ColumnSpan, CteEdge,
-    CteGraph, CteNode, EdgeType, JoinKeyPair, LeftJoinFact, SubqueryFact, SubqueryKind,
+    ColumnEdge, ColumnEdgeConfidence, ColumnEdgeKind, ColumnProvenance, ColumnProvenanceEntry,
+    ColumnRef, ColumnScope, ColumnSpan, CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair,
+    LeftJoinFact, SubqueryFact, SubqueryKind,
 };
 pub use experimental::{
     DEFAULT_MACRO_BODY_CAP, EnabledExperiments, Experiment, ExperimentalConfig, ExperimentalError,

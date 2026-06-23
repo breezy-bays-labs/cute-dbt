@@ -566,6 +566,81 @@ pub enum ColumnEdgeConfidence {
     Opaque,
 }
 
+/// POSITIVE per-output-column provenance (cute-dbt#450, CLL-4 reshape) — the
+/// projection resolver's explicit classification of HOW each output column of a
+/// CTE/terminal body originated. This is the never-INFER floor: the cross-model
+/// source-name-carry reads this marker to decide whether a column can trace to
+/// a real source field, instead of guessing from edge-ABSENCE.
+///
+/// The fabrication class the previous rounds chased — a `42 AS magic` / an
+/// `a.x + 1 AS y` projected ALONGSIDE a `select *` over an external leaf, which
+/// has no inbound column edge and so was mis-read as a "star pass-through" and
+/// fabricated as `source.magic`/`source.y` — is closed at the root here: such a
+/// column is positively marked [`Self::Literal`] / [`Self::Expression`] at the
+/// resolver and is NEVER source-attributed, even when it shares the projection
+/// with a star.
+///
+/// `#[non_exhaustive]` — additive; rendered/serialized only on the
+/// engine-internal facts (`#[serde(skip)]` on the graph), never in the embedded
+/// report payload.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ColumnProvenance {
+    /// A direct column reference — `a.x` (a bare/qualified pass-through). The
+    /// output name equals the input column name. Carries an inbound
+    /// `PassThrough` edge; resolves through the chain to a real source field.
+    DirectColumn,
+    /// A renamed column — `a.x AS y`. Carries an inbound `Renamed` edge;
+    /// resolves to the ORIGINAL upstream field name (`y → x`), so the trace
+    /// names the field that actually exists, never the renamed downstream name.
+    Rename,
+    /// A literal / constant projection — `42 AS magic`, `'US' AS country`,
+    /// `current_timestamp AS t`. NO source field exists; never traced.
+    Literal,
+    /// A computed expression — `a.x + 1 AS y`, `coalesce(a.x, b.y) AS z`. The
+    /// output is derived, not copied; NO single source field. Never traced.
+    Expression,
+    /// The column flowed through a `select *` / `q.*` over an EXTERNAL
+    /// `ref()`/`source()` leaf — it provably exists on that leaf under its own
+    /// name (the only star-pass-through case that may carry to a source). Set
+    /// only for the recorded `*` projection slot; a per-column star expansion
+    /// over a KNOWN intra CTE instead emits explicit `PassThrough` edges
+    /// (→ [`Self::DirectColumn`]).
+    StarCoveredExternal,
+}
+
+/// One per-output-column positive-provenance fact: the `(node_id, column)` the
+/// classification applies to, plus the [`ColumnProvenance`] marker. Engine-
+/// computed in the projection-provenance pass, hung off the [`CteGraph`] as a
+/// `#[serde(skip)]` fact (consumed by the cross-model source-name-carry only —
+/// never serialized into the embedded report payload, so goldens stay
+/// byte-stable). The `*` star slot is recorded under `column == "*"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnProvenanceEntry {
+    /// The owning node id (a CTE alias or `TERMINAL_NODE_NAME`).
+    pub node_id: String,
+    /// The output column name (lowercased), or `"*"` for the star slot.
+    pub column: String,
+    /// The positive provenance classification.
+    pub provenance: ColumnProvenance,
+}
+
+impl ColumnProvenanceEntry {
+    /// Canonical constructor.
+    #[must_use]
+    pub fn new(
+        node_id: impl Into<String>,
+        column: impl Into<String>,
+        provenance: ColumnProvenance,
+    ) -> Self {
+        Self {
+            node_id: node_id.into(),
+            column: column.into(),
+            provenance,
+        }
+    }
+}
+
 /// ONE directed column-provenance edge: an output column `to_col` derives
 /// from an input column `from_col`, classified by `kind` + `confidence`.
 /// The bidirectional edge set serves all three affordances (context,
@@ -691,6 +766,16 @@ pub struct CteGraph {
     /// in the same projection walk. Additive + `skip_serializing_if`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     column_spans: Vec<ColumnSpan>,
+    /// POSITIVE per-output-column provenance (cute-dbt#450, CLL-4 reshape) —
+    /// the projection resolver's explicit classification of every output column
+    /// across every body (`Literal` / `Expression` / `DirectColumn` / `Rename`
+    /// / `StarCoveredExternal`). The cross-model source-name-carry READS these
+    /// to decide a source edge, instead of INFERRING from edge-absence. Engine-
+    /// computed in the same single-parse projection pass. `#[serde(skip)]` —
+    /// an engine-internal fact consumed by the domain only, never serialized
+    /// into the embedded report payload (goldens stay byte-stable).
+    #[serde(skip)]
+    column_provenance: Vec<ColumnProvenanceEntry>,
 }
 
 impl CteGraph {
@@ -708,6 +793,7 @@ impl CteGraph {
             subquery_facts: Vec::new(),
             column_edges: Vec::new(),
             column_spans: Vec::new(),
+            column_provenance: Vec::new(),
         }
     }
 
@@ -801,6 +887,37 @@ impl CteGraph {
     #[must_use]
     pub fn column_spans(&self) -> &[ColumnSpan] {
         &self.column_spans
+    }
+
+    /// Attach engine-computed POSITIVE per-output-column provenance
+    /// (cute-dbt#450, CLL-4 reshape).
+    ///
+    /// Returns `self` with `column_provenance` set. Same single-parse
+    /// projection pass as [`Self::with_column_edges`] — never a second parse.
+    #[must_use]
+    pub fn with_column_provenance(mut self, column_provenance: Vec<ColumnProvenanceEntry>) -> Self {
+        self.column_provenance = column_provenance;
+        self
+    }
+
+    /// POSITIVE per-output-column provenance across every body (cute-dbt#450).
+    /// The cross-model source-name-carry reads this to decide a source edge
+    /// instead of inferring from edge-absence. Empty for graphs built without
+    /// engine-computed provenance.
+    #[must_use]
+    pub fn column_provenance(&self) -> &[ColumnProvenanceEntry] {
+        &self.column_provenance
+    }
+
+    /// The positive provenance of `(node_id, column)`, or `None` when the
+    /// resolver recorded no classification for it (an unreachable column — the
+    /// honest absence). First-match wins; the resolver records at most one
+    /// provenance per `(node_id, column)`.
+    fn provenance_of(&self, node_id: &str, column: &str) -> Option<ColumnProvenance> {
+        self.column_provenance
+            .iter()
+            .find(|p| p.node_id == node_id && p.column == column)
+            .map(|p| p.provenance)
     }
 
     /// CTE nodes in declaration order.
@@ -1067,45 +1184,31 @@ impl CteGraph {
             acc.absorb(self.inbound_source_name(edge, leaf_nodes, cte_names, memo, depth));
         }
 
-        // The star-passthrough fallback (a column with NO inbound edge flowed
-        // in through `select *` over the external leaf) fires ONLY when this
-        // node ACTUALLY carries a star projection over an external leaf — a
-        // recorded `*→*` edge landing on `(node_id, "*")` whose from-side is a
-        // truly external relation. A leaf-reading node with NO star at all (its
-        // projection is explicit) has a no-inbound-edge column because that
-        // column is a LITERAL / computed expression (`42 AS magic`,
-        // `current_timestamp AS t`) — which the engine emits NO edge for. Such
-        // a column MUST degrade to `None`; it is not a source field. (#450
-        // round-5: no `no-inbound-edge ⇒ assume pass-through` guess.)
-        let star_over_external = self.has_external_star(node_id, cte_names);
-        let result = acc.into_name(column, leaf_nodes.contains(node_id) && star_over_external);
+        // POSITIVE PROVENANCE (cute-dbt#450 reshape): a column with NO inbound
+        // edge is a star pass-through to the source ONLY when (a) the node
+        // POSITIVELY carries a `*` slot marked `StarCoveredExternal` (a
+        // `select *` over an external `ref()`/`source()` leaf — recorded at the
+        // projection resolver, NOT inferred from edge-absence) AND (b) the
+        // column itself is NOT positively marked `Literal` / `Expression`. A
+        // `42 AS magic` / `a.x + 1 AS y` projected ALONGSIDE the star also has
+        // no inbound edge, but it is positively `Literal`/`Expression` →
+        // EXCLUDED, even paired with the star. This closes the whole
+        // literal/expr-paired-with-star fabrication class: the star covers only
+        // the columns it provably passes through under their own name, never a
+        // sibling literal/computed projection. A column with no marker at all
+        // (it was never explicitly projected here — it flowed through the star)
+        // is eligible iff the node's star is external.
+        let own = self.provenance_of(node_id, column);
+        let column_is_computed = matches!(
+            own,
+            Some(ColumnProvenance::Literal | ColumnProvenance::Expression)
+        );
+        let star_passthrough = leaf_nodes.contains(node_id)
+            && !column_is_computed
+            && self.provenance_of(node_id, "*") == Some(ColumnProvenance::StarCoveredExternal);
+        let result = acc.into_name(column, star_passthrough);
         memo.insert(key, result.clone());
         result
-    }
-
-    /// `true` when `node_id` carries a star projection (`select *` / `q.*`)
-    /// over an EXTERNAL leaf relation — a recorded `*→*` column edge whose
-    /// target is `(node_id, "*")` and whose source node is NOT a sibling CTE
-    /// (a genuine `ref()`/`source()` boundary). This is the ONLY justification
-    /// for attributing a no-inbound-edge column to the source under its own
-    /// name: it flowed through the star unchanged. A node whose star is over a
-    /// KNOWN intra-model CTE instead expands to per-column edges (so its
-    /// columns carry explicit inbound edges and never reach the fallback); a
-    /// node with no star at all has no business attributing an edge-less
-    /// (literal/computed) column to a source.
-    fn has_external_star(
-        &self,
-        node_id: &str,
-        cte_names: &std::collections::BTreeSet<String>,
-    ) -> bool {
-        self.column_edges.iter().any(|edge| {
-            edge.from_col.column == "*"
-                && Self::edge_targets(edge, node_id, "*")
-                && matches!(
-                    &edge.from_col.scope,
-                    ColumnScope::Intra { node_id: from } if !cte_names.contains(from)
-                )
-        })
     }
 
     /// `true` when `edge` is an intra-scoped edge whose target is exactly
@@ -1189,14 +1292,15 @@ impl LeafResolution {
     }
 
     /// Resolve the fold to a source-side column name, or `None` to degrade.
-    /// `leaf_star_passthrough` is `true` ONLY when this node both reads an
-    /// external leaf AND carries a genuine `*` projection over it (see
-    /// [`CteGraph::has_external_star`]); in that case a column with NO clean
-    /// inbound edge flowed in through the `select *` unchanged, so the source
-    /// field is the column's own name. When the node has NO such star, an
-    /// edge-less column is a LITERAL / computed expression (`42 AS magic`,
-    /// `current_timestamp AS t`) — the engine emits no edge for it — and it
-    /// MUST degrade to `None` (never a fabricated source field).
+    /// `leaf_star_passthrough` is `true` ONLY when the caller has POSITIVELY
+    /// proven (via [`ColumnProvenance::StarCoveredExternal`] on the node's `*`
+    /// slot, AND the column is not itself marked `Literal`/`Expression`) that a
+    /// column with NO clean inbound edge flowed in through a `select *` over an
+    /// external leaf unchanged — so the source field is the column's own name.
+    /// Otherwise (a literal/computed projection, or no positive star marker) an
+    /// edge-less column MUST degrade to `None` (never a fabricated source
+    /// field). The decision is read from positive provenance, never inferred
+    /// from edge-absence (cute-dbt#450 reshape).
     fn into_name(self, column: &str, leaf_star_passthrough: bool) -> Option<String> {
         if self.blocked {
             None

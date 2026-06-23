@@ -477,6 +477,123 @@ from \"db\".\"raw\".\"orders\"";
     }
 }
 
+// ---- never-a-false-claim: a LITERAL / EXPRESSION PAIRED WITH `*` ---------
+// The round-6 reshape (#450): the previous rounds patched the read-time
+// inference (no-inbound-edge ⇒ assume star-passthrough). The remaining
+// fabrication shape is a literal / expression projected IN THE SAME NODE as a
+// `select *` over an external leaf: `select 42 as magic, * from src`. The star
+// emits a `*→*` Opaque edge (it cannot enumerate the source's columns), and
+// `magic` (a literal) emits NO inbound edge. The pre-reshape resolver saw "no
+// edge for `magic` + the node carries an external star" and fabricated
+// `source.magic`. The positive-provenance reshape marks `magic` as Literal at
+// the projection resolver, so it is NEVER source-attributed even when it sits
+// next to a star. The genuine star-passthrough columns (named explicitly
+// downstream and proven to flow through the star) still trace to their real
+// source fields.
+
+#[test]
+fn literal_paired_with_star_in_a_leaf_cte_never_fabricates_a_source_field() {
+    // The reshape's headline fabrication shape: a leaf CTE `a` projects a
+    // literal `42 as magic` ALONGSIDE a `select *` over the external source,
+    // and the terminal names `magic` explicitly (`select order_id, magic from
+    // a`). In `a`, the star emits a `*→*` Opaque edge (the source's columns are
+    // not enumerable) and `magic` (a literal) emits NO inbound edge. The
+    // terminal's `magic` has a clean PassThrough edge from `a`, so the chain
+    // walks `terminal.magic → a.magic`; at `a`, the pre-reshape resolver saw
+    // "no edge for `magic` + `a` carries an external star" and FABRICATED
+    // `source.magic`. Positive provenance marks `a.magic` as Literal → never a
+    // source field, even though it shares the projection with a `select *`.
+    let m = "\
+with a as (
+    select 42 as magic, * from \"db\".\"raw\".\"orders\"
+)
+select order_id, magic from a";
+    let manifest = manifest_of(
+        vec![model(
+            "model.p.stg",
+            "\"db\".\"staging\".\"stg\"",
+            m,
+            &["source.p.raw.orders"],
+        )],
+        vec![source(
+            "source.p.raw.orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+    let source_fields_named: std::collections::BTreeSet<&str> = graph
+        .edges()
+        .iter()
+        .filter(|e| e.upstream == nid("source.p.raw.orders"))
+        .map(|e| e.upstream_column.as_str())
+        .collect();
+    // THE FLOOR: the literal `magic` is NEVER fabricated as a source field,
+    // even though it shares the projection with a `select *`.
+    assert!(
+        !source_fields_named.contains("magic"),
+        "`42 as magic` paired with `select *` is still a literal — \
+         `source.magic` does NOT exist and must NEVER be fabricated"
+    );
+    // And `magic`'s trace degrades — it never claims a source origin.
+    let magic_trace = graph.trace_to_source(&manifest, &nid("model.p.stg"), "magic");
+    assert_ne!(
+        magic_trace.termination,
+        TraceTermination::Source,
+        "a literal alias paired with `*` never claims a source origin"
+    );
+}
+
+#[test]
+fn expression_paired_with_star_in_a_leaf_cte_never_fabricates_a_source_field() {
+    // The expression twin of the above: a leaf CTE `a` projects an EXPRESSION
+    // `order_id + 1 as bumped` ALONGSIDE a `select *` over the external source,
+    // and the terminal names `bumped` explicitly. In `a`, `bumped` carries a
+    // `Derived` inbound edge (from `order_id`), NOT a clean pass-through, so it
+    // must degrade — `bumped` is a computed value, never a source field, even
+    // paired with `select *`.
+    let m = "\
+with a as (
+    select order_id + 1 as bumped, * from \"db\".\"raw\".\"orders\"
+)
+select order_id, bumped from a";
+    let manifest = manifest_of(
+        vec![model(
+            "model.p.stg",
+            "\"db\".\"staging\".\"stg\"",
+            m,
+            &["source.p.raw.orders"],
+        )],
+        vec![source(
+            "source.p.raw.orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+    let source_fields_named: std::collections::BTreeSet<&str> = graph
+        .edges()
+        .iter()
+        .filter(|e| e.upstream == nid("source.p.raw.orders"))
+        .map(|e| e.upstream_column.as_str())
+        .collect();
+    // THE FLOOR: the expression result `bumped` is NEVER a source field, even
+    // paired with `select *`.
+    assert!(
+        !source_fields_named.contains("bumped"),
+        "`order_id + 1 as bumped` paired with `select *` is a computed \
+         expression — `source.bumped` does NOT exist and must NEVER be fabricated"
+    );
+    let bumped_trace = graph.trace_to_source(&manifest, &nid("model.p.stg"), "bumped");
+    assert_ne!(
+        bumped_trace.termination,
+        TraceTermination::Source,
+        "an expression alias paired with `*` never claims a source origin"
+    );
+}
+
 // ---- B: blast-radius (TDD 3) --------------------------------------------
 
 #[test]
