@@ -362,30 +362,79 @@ pub struct RawDagNodePayload {
     pub presence: &'static str,
 }
 
-/// The raw structural DAG (cute-dbt#470, S2) — `nodes` only. Edges +
-/// `node_map.raw` (the 1→N observed correspondence) are S3 (cute-dbt#471) and
-/// are DELIBERATELY ABSENT here, never faked: this payload carries only the
-/// sound raw nodes + the N→1 `node_map.compiled` fold (on [`CodeMapPayload`]).
+/// ONE directed raw-structural-DAG edge (cute-dbt#471, S3). Emitted ONLY where
+/// the dependency is **lexically explicit and unconditional** in the masked
+/// (un-templated) raw text — a bare `from <sibling_cte>` / `join <sibling_cte>`
+/// between two verbatim raw CTE nodes. A dependency mediated by `{{ ref() }}` /
+/// `{% for %}` / a macro is masked to whitespace before this scan runs, so it
+/// produces NO edge (the pane shows the dependency as *unresolved*) — never a
+/// guessed one (the load-bearing fabrication contract, honesty principle 3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct RawDagEdgePayload {
+    /// The upstream raw node id (the referenced sibling CTE).
+    pub from: String,
+    /// The downstream raw node id (the CTE whose body names `from`).
+    pub to: String,
+    /// The 3-state confidence MIRRORING the compiled side
+    /// ([`crate::domain::cte::ColumnEdgeConfidence`]): in S3 a lexically-explicit
+    /// `from sibling` is always `"resolved"` (the masking scan only emits edges
+    /// it can prove). The `"ambiguous"`/`"opaque"` strings stay in the wire
+    /// vocabulary for symmetry with the compiled-edge confidence, reserved for a
+    /// future raw-edge form that can degrade rather than omit.
+    pub confidence: &'static str,
+}
+
+/// The raw structural DAG (cute-dbt#470 S2 nodes; cute-dbt#471 S3 edges). The
+/// `nodes` are the sound literal regions; `edges` are the lexically-explicit
+/// unconditional dependencies between verbatim raw CTE nodes. A Jinja-mediated
+/// dependency emits NO edge (it is masked away before the scan) — the pane shows
+/// it as unresolved, never a fabricated edge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RawDagPayload {
     /// The sound raw structural nodes (verbatim CTEs + WITH-less terminal +
     /// control zones). Empty (the whole `raw_dag` key omitted) for a model with
     /// no resolvable raw structure, so pre-#470 goldens stay byte-stable.
     pub nodes: Vec<RawDagNodePayload>,
+    /// The lexically-explicit unconditional edges (cute-dbt#471, S3) — a bare
+    /// `from sibling`/`join sibling` between two verbatim raw CTE nodes in
+    /// un-templated text. Omitted from the wire when empty (a model with no
+    /// resolvable explicit CTE-to-CTE dependency — e.g. every dependency runs
+    /// through `{{ ref() }}` / `{% for %}` / a macro) so pre-#471 goldens stay
+    /// byte-stable.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edges: Vec<RawDagEdgePayload>,
 }
 
-/// The compiled⇄raw node correspondence (cute-dbt#470, S2) — S2 fills ONLY the
-/// `compiled` half (the N→1 fold `compiledId → rawId`); the `raw` half (1→N,
-/// observed) is S3 (cute-dbt#471) and is absent here, never faked. The whole
-/// `node_map` key is omitted when `compiled` is empty (byte-stable goldens).
+/// The compiled⇄raw node correspondence (cute-dbt#470 `compiled`; cute-dbt#471
+/// `raw`) — `compiled` is the N→1 fold `compiledId → rawId`; `raw` is the 1→N
+/// OBSERVED fold `rawId → [compiledId…]`. The whole `node_map` key is omitted
+/// when BOTH halves are empty (byte-stable goldens).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NodeMapPayload {
     /// `compiledId → rawId` (N→1): each compiled DAG node folded back to its
     /// UNIQUE raw origin. A compiled node with NO unique raw origin OMITS its
     /// key (never a guessed `rawId`). A `{% for %}`-fanned set of compiled CTEs
     /// all map back to the ONE template zone raw node (by structural
-    /// containment), omitting where the origin is ambiguous.
+    /// containment), omitting where the origin is ambiguous. Omitted from the
+    /// wire when empty so a model that only resolves `raw`-half keys still
+    /// drops this half cleanly.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub compiled: BTreeMap<String, String>,
+    /// `rawId → [compiledId…]` (1→N, cute-dbt#471, S3): each raw node's
+    /// **OBSERVED** compiled set — folded from the ACTUAL compiled DAG cute-dbt
+    /// ingests, NEVER an enumerated/predicted count. A verbatim CTE raw node
+    /// maps to `[its own compiled id]` (or `[]` if it compiled out this build).
+    /// A `{% for %}` zone raw node maps to the compiled CTEs whose span falls
+    /// within the zone's compiled EXTENT (the observed fan-out, derived by
+    /// boundary-anchoring the literal text before/after the zone). A raw node
+    /// that **compiled out entirely** this build maps to `[]` — the positive
+    /// "zero compiled nodes this build" claim (KEY PRESENT), DISTINCT from an
+    /// absent key (= no such raw node; honesty principle 7). A zone whose
+    /// compiled extent does NOT anchor uniquely is OMITTED (never over-claimed —
+    /// omit-on-ambiguous). Omitted from the wire when empty so pre-#471 goldens
+    /// stay byte-stable.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub raw: BTreeMap<String, Vec<String>>,
 }
 
 /// The per-model source-map render projection (cute-dbt#445) — Serialize-only,
@@ -444,7 +493,23 @@ impl CodeMapPayload {
     /// text, the derived `CteBody` node-span table, and the (deferred) raw
     /// zones. Pure projection: every field is read off the spine fact, never
     /// recomputed.
+    /// Test-only S2-shape projection (no raw threaded): nodes +
+    /// `node_map.compiled` only, no edges, no `node_map.raw`. The production path
+    /// always uses [`Self::from_source_map_with_raw`] with the model's raw text;
+    /// this thin alias keeps the S2 unit tests (which build a `SourceMap`
+    /// directly, with no raw text to thread) expressing the no-raw contract.
+    #[cfg(test)]
     fn from_source_map(sm: &SourceMap) -> Self {
+        Self::from_source_map_with_raw(sm, None)
+    }
+
+    /// Project a domain [`SourceMap`] into the render payload, threading the
+    /// model's `raw_code` (cute-dbt#471, S3) so the raw-DAG **edges** + the
+    /// `node_map.raw` **observed** fold can be derived from the actual masked
+    /// raw text + the compiled DAG. `raw == None` reproduces the S2 behavior
+    /// exactly (nodes + `node_map.compiled` only; no edges, no `node_map.raw`),
+    /// so every test that builds a `SourceMap` directly stays meaningful.
+    fn from_source_map_with_raw(sm: &SourceMap, raw: Option<&str>) -> Self {
         let node_spans = sm.node_spans();
         let raw_zones = gather_raw_zones(sm, &node_spans);
         // cute-dbt#447 (CLL-2) — flatten the `SpanRole::Column` entries into a
@@ -472,7 +537,7 @@ impl CodeMapPayload {
         // (`node_spans` are the compiled DAG nodes folded back). `None` when no
         // raw structure / no unique origin resolves, so the keys are omitted and
         // pre-#470 goldens stay byte-stable.
-        let (raw_dag, node_map) = build_raw_dag_and_node_map(sm, &node_spans);
+        let (raw_dag, node_map) = build_raw_dag_and_node_map(sm, &node_spans, raw);
         Self {
             compiled: sm.compiled.clone(),
             node_spans,
@@ -486,55 +551,63 @@ impl CodeMapPayload {
     }
 }
 
-/// Build the raw structural DAG nodes + the N→1 `node_map.compiled` fold
-/// (cute-dbt#470, S2) from the assembled [`SourceMap`] and the model's compiled
-/// `node_spans` (the compiled DAG node ids → spans).
+/// Build the raw structural DAG (nodes plus edges) and the `node_map` (the N→1
+/// `compiled` half and the 1→N `raw` half) from the assembled [`SourceMap`], the
+/// model's compiled `node_spans`, and (cute-dbt#471, S3) the model's `raw` text.
 ///
-/// ## `raw_dag.nodes` (every node a SOUND literal `raw_code` region)
+/// ## `raw_dag.nodes` (cute-dbt#470, S2 — every node a SOUND literal region)
 ///
 /// - **CTE raw node** — one per `CteBody` entry whose `raw` span the `raw_scan`
-///   adapter UNIQUELY anchored (a verbatim `WITH` CTE). `presence = compiled_in`
-///   (a verbatim CTE anchored against the compiled output is, by definition, in
-///   it). Id == the CTE alias (== the compiled DAG node id — the N→1 identity).
+///   adapter UNIQUELY anchored (a verbatim `WITH` CTE). `presence = compiled_in`.
+///   Id == the CTE alias (== the compiled DAG node id — the N→1 identity).
 /// - **WITH-less terminal raw node** — synthesized as exactly ONE `terminal`
-///   node when the model is WITH-less (the compiled DAG is the lone
-///   [`TERMINAL_NODE_NAME`] node AND no `CteBody` carries a raw span — there is
-///   no `WITH`). Mirrors [`crate::domain::source_map::SourceMap::from_cte_graph`]'s
-///   terminal synthesis so `node_map.compiled` stays TOTAL for WITH-less models.
-///   `presence = compiled_in`.
-/// - **Zone raw node** — one per `Zone` entry, id `zone:<index>` (stable
-///   appearance order). `presence` is the honest 3-state [`Presence`] verdict
-///   (a pruned `is_incremental()` zone is `compiled_out`, NEVER `compiled_in`).
+///   node when the model is WITH-less, so `node_map.compiled` stays TOTAL.
+/// - **Zone raw node** — one per `Zone` entry, id `zone:<index>`. `presence` is
+///   the honest 3-state verdict (a pruned `is_incremental()` zone is
+///   `compiled_out`, NEVER `compiled_in`).
 ///
-/// ## `node_map.compiled` (N→1, `compiledId → rawId`, S2 = uniquely-locatable only)
+/// ## `raw_dag.edges` (cute-dbt#471, S3 — lexically-explicit ONLY)
 ///
-/// For each compiled DAG node id, S2 maps ONLY the two origins it can locate
-/// UNAMBIGUOUSLY without a zone compiled-EXTENT:
-/// - A raw CTE node with the SAME id ⇒ map to it (the verbatim-CTE identity).
-/// - Else the WITH-less terminal ⇒ map to the synthesized terminal raw node.
-/// - Everything else (a `{% for %}`-fanned CTE, a macro-expanded CTE) has NO
-///   uniquely-locatable raw origin in S2 and is honestly OMITTED — never a
-///   guessed `rawId`. The observed fanned→zone mapping needs the zone's compiled
-///   EXTENT (a zone's `entry.compiled` is a single literal ANCHOR, not an
-///   extent — see `resolve_zone_compiled`), so it lands in S3 #471 alongside
-///   `node_map.raw`.
+/// A bare `from <sibling>` / `join <sibling>` between two verbatim raw CTE nodes
+/// in MASKED (un-templated) text (`raw_scan::explicit_cte_edges`). A dependency
+/// through `{{ ref() }}` / `{% for %}` / a macro is masked away ⇒ NO edge (the
+/// pane shows it unresolved, never a guessed edge). `confidence = "resolved"`
+/// (the masking scan only emits a dependency it can prove). `None` raw ⇒ no edges
+/// (the S2 shape).
+///
+/// ## `node_map.compiled` (N→1, `compiledId → rawId`, uniquely-locatable only)
+///
+/// - A raw CTE node with the SAME id ⇒ map to it (verbatim-CTE identity).
+/// - The WITH-less terminal ⇒ the synthesized terminal raw node.
+/// - **A `{% for %}`-fanned CTE inside a zone's compiled EXTENT** (cute-dbt#471) ⇒
+///   the zone raw node (N→1 backfill), when the extent anchors soundly.
+/// - Everything else has NO uniquely-locatable raw origin ⇒ OMITTED.
+///
+/// ## `node_map.raw` (1→N, `rawId → [compiledId…]`, OBSERVED — cute-dbt#471, S3)
+///
+/// - A verbatim CTE / WITH-less terminal raw node ⇒ `[its own compiled id]`, or
+///   `[]` (KEY PRESENT) if it compiled OUT this build (honesty principle 7).
+/// - A zone raw node ⇒ the OBSERVED compiled CTEs whose span falls within the
+///   zone's compiled EXTENT (`raw_scan::zone_compiled_extent`, boundary-anchored).
+///   A `compiled_out` zone ⇒ `[]`. A zone whose extent does NOT anchor uniquely
+///   is OMITTED (omit-on-ambiguous — never over-claim membership).
 fn build_raw_dag_and_node_map(
     sm: &SourceMap,
     node_spans: &BTreeMap<String, SourceSpan>,
+    raw: Option<&str>,
 ) -> (Option<RawDagPayload>, Option<NodeMapPayload>) {
-    // The raw CTE nodes: every CteBody whose raw span was uniquely anchored.
-    let raw_cte_ids: std::collections::BTreeSet<String> = sm.raw_node_spans().into_keys().collect();
+    // The raw CTE nodes (id → raw span): every CteBody whose raw span was
+    // uniquely anchored.
+    let raw_cte_spans = sm.raw_node_spans();
+    let raw_cte_ids: std::collections::BTreeSet<String> = raw_cte_spans.keys().cloned().collect();
     // A WITH-less model: the compiled DAG is the lone terminal node AND no CTE
     // carries a raw span (no `WITH`). Mirror from_cte_graph's terminal synthesis
-    // so node_map.compiled stays total for WITH-less models. A WITH-bearing
-    // terminal has no verbatim raw region, so it is NOT synthesized here and its
-    // node_map key is honestly omitted.
+    // so node_map.compiled stays total for WITH-less models.
     let is_with_less = raw_cte_ids.is_empty()
         && node_spans.len() == 1
         && node_spans.contains_key(TERMINAL_NODE_NAME);
 
     let mut nodes: Vec<RawDagNodePayload> = Vec::new();
-    // CTE raw nodes (stable BTreeSet order).
     for id in &raw_cte_ids {
         nodes.push(RawDagNodePayload {
             id: id.clone(),
@@ -543,7 +616,6 @@ fn build_raw_dag_and_node_map(
             presence: Presence::CompiledIn.to_wire(),
         });
     }
-    // The WITH-less terminal raw node (exactly one).
     if is_with_less {
         nodes.push(RawDagNodePayload {
             id: TERMINAL_NODE_NAME.to_owned(),
@@ -552,49 +624,316 @@ fn build_raw_dag_and_node_map(
             presence: Presence::CompiledIn.to_wire(),
         });
     }
-    // Zone raw nodes — id `zone:<index>` by appearance order; carry the honest
-    // 3-state presence. The zone's `entry.compiled` is a single literal ANCHOR
-    // (`resolve_zone_compiled`), NOT the zone's compiled EXTENT, so it cannot
-    // locate the separate fanned CTE bodies — S2 emits the zone NODE but folds
-    // nothing through it (the fanned→zone mapping is S3 #471, which needs the
-    // extent + `node_map.raw`).
+    // Zone raw nodes — id `zone:<index>` by appearance order. Keep each zone's
+    // raw span + id for the extent fold, and its LEGACY anchor-based presence as
+    // the fallback for an unanchorable zone. The zone NODE's presence is NOT
+    // emitted here: it is DERIVED from the extent fold below so it can never
+    // contradict `node_map.raw` membership (cute-dbt#471 Finding C).
     let cte_spans: Vec<SourceSpan> = node_spans.values().copied().collect();
+    let mut zone_nodes: Vec<ZoneNode> = Vec::new();
+    // Each zone's `(id, legacy_presence)` in appearance order — drives node push
+    // AFTER the fold so presence is fold-consistent.
+    let mut zone_meta: Vec<(String, Presence)> = Vec::new();
     for (zone_index, entry) in sm
         .entries
         .iter()
         .filter(|e| matches!(e.role, SpanRole::Zone { .. }))
         .enumerate()
     {
-        nodes.push(RawDagNodePayload {
-            id: format!("zone:{zone_index}"),
-            role: "zone",
-            is_zone: true,
-            presence: entry.presence(&cte_spans).to_wire(),
-        });
+        let id = format!("zone:{zone_index}");
+        zone_meta.push((id.clone(), entry.presence(&cte_spans)));
+        if let Some(raw_span) = entry.raw {
+            zone_nodes.push(ZoneNode { id, raw_span });
+        }
     }
 
-    // node_map.compiled — fold each compiled DAG node back to the ONLY origins
-    // S2 can locate UNAMBIGUOUSLY: a verbatim CTE (same id) and the WITH-less
-    // terminal. A fanned/macro CTE has no uniquely-locatable raw origin here (a
-    // zone's `entry.compiled` is an anchor, not an extent), so it is honestly
-    // OMITTED — never a guessed rawId. The fanned→zone mapping lands in S3 #471.
+    // cute-dbt#471 (S3): the observed fanned→zone EXTENT fold (compiled_owner =
+    // the N→1 backfill, zone_members = the 1→N observed sets, omit-on-ambiguous).
+    // MUST run before the zone nodes are pushed so each zone's emitted presence
+    // is reconciled with its proven membership (Finding C: never claim a zone
+    // `compiled_out` while `node_map.raw[zone]` lists members).
+    let fold = fold_zone_extents(raw, sm, node_spans, &zone_nodes);
+    // Push the zone nodes with FOLD-DERIVED presence (Finding C consistency):
+    // - non-empty `zone_members` ⇒ CompiledIn (provably produced compiled CTEs);
+    // - empty `[]` `zone_members` ⇒ CompiledOut (sound-empty extent = pruned);
+    // - an omitted (unanchorable) zone, or a zone with no raw span (never folded)
+    //   ⇒ keep the legacy anchor-based presence (SOUND: `node_map.raw` omits the
+    //   zone in both cases, so there is no members-vs-presence contradiction).
+    for (id, legacy_presence) in &zone_meta {
+        let presence = match fold.zone_members.get(id) {
+            Some(members) if !members.is_empty() => Presence::CompiledIn,
+            Some(_) => Presence::CompiledOut,
+            None => *legacy_presence,
+        };
+        nodes.push(RawDagNodePayload {
+            id: id.clone(),
+            role: "zone",
+            is_zone: true,
+            presence: presence.to_wire(),
+        });
+    }
+    let compiled_map =
+        build_node_map_compiled(node_spans, &raw_cte_ids, is_with_less, &fold.compiled_owner);
+    let raw_map = build_node_map_raw(
+        raw.is_some(),
+        &raw_cte_ids,
+        node_spans,
+        is_with_less,
+        &fold,
+        &zone_nodes,
+    );
+    // cute-dbt#471 (S3): edges — lexically-explicit CTE-to-CTE only.
+    let edges = match raw {
+        Some(raw_text) => crate::adapters::raw_scan::explicit_cte_edges(raw_text, &raw_cte_spans)
+            .into_iter()
+            .map(|e| RawDagEdgePayload {
+                from: e.from,
+                to: e.to,
+                // The masking scan only emits a provable lexical dependency.
+                confidence: "resolved",
+            })
+            .collect(),
+        None => Vec::new(),
+    };
+
+    let raw_dag = (!nodes.is_empty()).then_some(RawDagPayload { nodes, edges });
+    let node_map = (!compiled_map.is_empty() || !raw_map.is_empty()).then_some(NodeMapPayload {
+        compiled: compiled_map,
+        raw: raw_map,
+    });
+    (raw_dag, node_map)
+}
+
+/// A located raw `{% if %}`/`{% for %}` zone node (cute-dbt#471) — its stable id
+/// + raw span, retained for the compiled-EXTENT fold.
+struct ZoneNode {
+    id: String,
+    raw_span: SourceSpan,
+}
+
+/// The outcome of the observed fanned→zone EXTENT fold (cute-dbt#471, S3).
+struct ZoneExtentFold {
+    /// `compiled id → owning zone id` (the N→1 backfill into `node_map.compiled`).
+    compiled_owner: BTreeMap<String, String>,
+    /// `zone id → [observed compiled ids]` (the 1→N `node_map.raw` set — KEY
+    /// PRESENT incl. the honest `[]` of a sound-but-empty extent).
+    zone_members: BTreeMap<String, Vec<String>>,
+    /// Zones whose extent did NOT anchor uniquely (OMITTED — never over-claimed).
+    omitted_zones: std::collections::BTreeSet<String>,
+}
+
+/// A zone's boundary-anchored compiled EXTENT — the `[start, end)` byte range
+/// plus the zone id, retained so NESTED/overlapping extents can be reconciled by
+/// innermost-wins / omit-on-overlap (cute-dbt#471 Finding D).
+struct ZoneExtent {
+    id: String,
+    start: u32,
+    end: u32,
+}
+
+impl ZoneExtent {
+    /// The byte width of the extent — smaller ⇒ tighter (the innermost producer
+    /// of a CTE structurally inside several nested zone extents).
+    fn width(&self) -> u32 {
+        self.end.saturating_sub(self.start)
+    }
+
+    /// Does this extent CONTAIN `span` (half-open, both endpoints inside)?
+    fn contains(&self, span: &SourceSpan) -> bool {
+        self.start < self.end // a non-empty extent only
+            && span.start.byte >= self.start
+            && span.end.byte <= self.end
+    }
+
+    /// Is this extent STRICTLY inside `other` (contained AND not identical)? Used
+    /// to pick the innermost owner: the unique extent contained in every other
+    /// extent that also contains the CTE.
+    fn strictly_inside(&self, other: &ZoneExtent) -> bool {
+        other.start <= self.start
+            && self.end <= other.end
+            && (other.start, other.end) != (self.start, self.end)
+    }
+}
+
+/// For each zone raw node, derive its compiled EXTENT by boundary-anchoring
+/// (`raw_scan::zone_compiled_extent`, omit-on-ambiguous), then fold the compiled
+/// CTEs structurally inside it — the OBSERVED fan-out (cute-dbt#471, S3). A sound
+/// extent yields a KEY-PRESENT member set (possibly the honest `[]`); an
+/// unanchorable extent OMITS the zone (we can prove NEITHER membership NOR
+/// emptiness — never a guessed `[]`). Only attempted when `raw` is present (the
+/// report path); `None` raw ⇒ the S2 shape (an empty fold).
+///
+/// NESTED / OVERLAPPING extents (cute-dbt#471 Finding D, never-a-false-claim): a
+/// compiled CTE structurally inside `{% for %} … {% if %} … {% endif %} …
+/// {% endfor %}` falls inside BOTH zone extents. We MUST NOT let the last
+/// `insert` arbitrarily win:
+/// - `compiled_owner` (N→1): a CTE claimed by >1 zone extent has an AMBIGUOUS raw
+///   origin ⇒ OMITTED (no key, never a guessed/last-wins owner).
+/// - `zone_members` (1→N): a CTE is listed ONLY under the INNERMOST (smallest-
+///   byte-span) containing extent — the true producer — so it is not
+///   double-claimed. If two containing extents are identical/incomparable
+///   (neither strictly inside the other), the CTE is OMITTED from both.
+fn fold_zone_extents(
+    raw: Option<&str>,
+    sm: &SourceMap,
+    node_spans: &BTreeMap<String, SourceSpan>,
+    zone_nodes: &[ZoneNode],
+) -> ZoneExtentFold {
+    let mut compiled_owner: BTreeMap<String, String> = BTreeMap::new();
+    let mut zone_members: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    let mut omitted_zones: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let Some(raw_text) = raw else {
+        return ZoneExtentFold {
+            compiled_owner,
+            zone_members,
+            omitted_zones,
+        };
+    };
+    // First pass: anchor each zone's extent (omit-on-ambiguous). KEY-PRESENT
+    // zone_members seeded to `[]` so a sound-but-empty extent is the honest `[]`.
+    let mut extents: Vec<ZoneExtent> = Vec::new();
+    for zone in zone_nodes {
+        match crate::adapters::raw_scan::zone_compiled_extent(
+            raw_text,
+            &zone.raw_span,
+            &sm.compiled,
+        ) {
+            Some((start, end)) => {
+                extents.push(ZoneExtent {
+                    id: zone.id.clone(),
+                    start,
+                    end,
+                });
+                zone_members.insert(zone.id.clone(), Vec::new());
+            }
+            None => {
+                // Unanchorable extent ⇒ OMIT (omit-on-ambiguous). We do NOT fall
+                // back to the zone's `presence` to claim `[]`: a `compiled_out`
+                // presence can arise from an AMBIGUOUS anchor (a loop body literal
+                // occurring N times) just as much as a genuine prune, so a `[]`
+                // here would risk a FALSE "zero compiled nodes this build" claim.
+                // The honest `[]` is ONLY the sound-empty-extent case below.
+                omitted_zones.insert(zone.id.clone());
+            }
+        }
+    }
+    // Second pass: fold each compiled CTE into the two maps under DISTINCT rules
+    // (cute-dbt#471 Finding D) — both fail-closed against a guessed origin:
+    //
+    // - `compiled_owner` (N→1, `compiledId → owning zone`): the key is written
+    //   ONLY when EXACTLY ONE extent contains the CTE. A CTE claimed by >1 extent
+    //   has an AMBIGUOUS raw origin ⇒ OMITTED (no key, never last-wins).
+    // - `zone_members` (1→N, `zone → [compiledId…]`): a CTE inside several nested
+    //   extents is listed under the INNERMOST (tightest) one — its true producer.
+    //   Two incomparable/identical containing extents ⇒ OMITTED from both (we
+    //   cannot prove which is the producer).
+    for (id, span) in node_spans {
+        if id.as_str() == TERMINAL_NODE_NAME {
+            continue;
+        }
+        let containing: Vec<&ZoneExtent> = extents.iter().filter(|e| e.contains(span)).collect();
+        // N→1: a UNIQUE containing extent is an unambiguous owner; >1 ⇒ omit.
+        if let [only] = containing.as_slice() {
+            compiled_owner.insert(id.clone(), only.id.clone());
+        }
+        // 1→N: list under the innermost (or omit when incomparable/identical).
+        if let Some(producer) = innermost_extent(&containing) {
+            zone_members
+                .entry(producer.id.clone())
+                .or_default()
+                .push(id.clone());
+        }
+    }
+    for members in zone_members.values_mut() {
+        members.sort();
+    }
+    ZoneExtentFold {
+        compiled_owner,
+        zone_members,
+        omitted_zones,
+    }
+}
+
+/// The unique INNERMOST extent of `containing` (the extents that all contain one
+/// compiled CTE) — the tightest (smallest-width) extent that is STRICTLY inside
+/// every other containing extent (cute-dbt#471 Finding D, innermost-wins). The
+/// true producer of a CTE nested in `{% for %} … {% if %} … {% endif %} …
+/// {% endfor %}` is the inner `{% if %}`. Returns `None` when:
+/// - `containing` is empty (the CTE is in no zone extent), OR
+/// - the tightest candidate is NOT strictly inside some other containing extent
+///   — i.e. two extents are identical or partially overlap without nesting
+///   (incomparable). An ambiguous origin ⇒ omit from both maps (never last-wins).
+fn innermost_extent<'a>(containing: &[&'a ZoneExtent]) -> Option<&'a ZoneExtent> {
+    // The tightest candidate (smallest byte width) is the only one that COULD be
+    // strictly inside all the others. Ties on width are incomparable ⇒ ambiguous.
+    let candidate = *containing.iter().min_by_key(|e| e.width())?;
+    let unambiguous = containing
+        .iter()
+        .all(|other| std::ptr::eq(*other, candidate) || candidate.strictly_inside(other));
+    unambiguous.then_some(candidate)
+}
+
+/// `node_map.compiled` (N→1): a verbatim CTE (same id), the WITH-less terminal,
+/// OR a fanned CTE whose owning zone the extent fold located (cute-dbt#471). A
+/// compiled CTE with no uniquely-locatable raw origin is OMITTED — never guessed.
+fn build_node_map_compiled(
+    node_spans: &BTreeMap<String, SourceSpan>,
+    raw_cte_ids: &std::collections::BTreeSet<String>,
+    is_with_less: bool,
+    compiled_owner: &BTreeMap<String, String>,
+) -> BTreeMap<String, String> {
     let mut compiled_map: BTreeMap<String, String> = BTreeMap::new();
     for compiled_id in node_spans.keys() {
         if raw_cte_ids.contains(compiled_id) {
-            // Verbatim CTE identity: compiled id == raw id.
             compiled_map.insert(compiled_id.clone(), compiled_id.clone());
         } else if is_with_less && compiled_id == TERMINAL_NODE_NAME {
-            // WITH-less terminal ⇒ the synthesized terminal raw node.
             compiled_map.insert(compiled_id.clone(), TERMINAL_NODE_NAME.to_owned());
+        } else if let Some(zone_id) = compiled_owner.get(compiled_id) {
+            compiled_map.insert(compiled_id.clone(), zone_id.clone());
         }
-        // No uniquely-locatable raw origin ⇒ OMIT (never a guessed rawId).
     }
+    compiled_map
+}
 
-    let raw_dag = (!nodes.is_empty()).then_some(RawDagPayload { nodes });
-    let node_map = (!compiled_map.is_empty()).then_some(NodeMapPayload {
-        compiled: compiled_map,
-    });
-    (raw_dag, node_map)
+/// `node_map.raw` (1→N, OBSERVED, cute-dbt#471): each raw node's observed compiled
+/// set — a verbatim CTE is `[id]` (or `[]`, KEY PRESENT, when compiled out), the
+/// WITH-less terminal is `[terminal]`, a zone is its extent-fold members (KEY
+/// PRESENT incl. `[]`), and an omitted (unanchorable) zone carries NO key. Empty
+/// (the production S2 shape) when `raw_present` is false.
+fn build_node_map_raw(
+    raw_present: bool,
+    raw_cte_ids: &std::collections::BTreeSet<String>,
+    node_spans: &BTreeMap<String, SourceSpan>,
+    is_with_less: bool,
+    fold: &ZoneExtentFold,
+    zone_nodes: &[ZoneNode],
+) -> BTreeMap<String, Vec<String>> {
+    let mut raw_map: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    if !raw_present {
+        return raw_map;
+    }
+    for id in raw_cte_ids {
+        let observed = if node_spans.contains_key(id) {
+            vec![id.clone()]
+        } else {
+            Vec::new()
+        };
+        raw_map.insert(id.clone(), observed);
+    }
+    if is_with_less {
+        raw_map.insert(
+            TERMINAL_NODE_NAME.to_owned(),
+            vec![TERMINAL_NODE_NAME.to_owned()],
+        );
+    }
+    for zone in zone_nodes {
+        if fold.omitted_zones.contains(&zone.id) {
+            continue;
+        }
+        let members = fold.zone_members.get(&zone.id).cloned().unwrap_or_default();
+        raw_map.insert(zone.id.clone(), members);
+    }
+    raw_map
 }
 
 /// Project the `SpanRole::Zone` entries of a [`SourceMap`] into
@@ -4871,7 +5210,15 @@ fn build_model_payload(
         }
     }
     let compiled_sql = build_compiled_sql(source_map.as_ref());
-    let code_map = source_map.as_ref().map(CodeMapPayload::from_source_map);
+    // cute-dbt#471 (S3) — thread the model's raw_code so CodeMapPayload can
+    // derive the raw-DAG EDGES (lexically-explicit `from sibling`, masked) + the
+    // `node_map.raw` OBSERVED fold (verbatim-CTE 1→1 + the `{% for %}` zone's
+    // observed fan-out via the compiled EXTENT). `None` raw reproduces the S2
+    // shape exactly (no edges, no node_map.raw).
+    let model_raw = model.raw_code().filter(|s| !s.is_empty());
+    let code_map = source_map
+        .as_ref()
+        .map(|sm| CodeMapPayload::from_source_map_with_raw(sm, model_raw));
     // cute-dbt#446 (CLL-1) — the Tier-2 column-lineage context: a pure
     // manifest fold (per-column definition + tested-by). `context`-only
     // (no edges yet); omitted from the wire when the model has no documented
@@ -8586,6 +8933,7 @@ mod tests {
         // Pin the wire shape the prototype consumes: raw_dag.nodes carries
         // id/role/is_zone/presence; node_map.compiled is a flat compiledId→rawId
         // map. (Serialize-only payloads — no Deserialize round-trip needed.)
+        // EMPTY edges are omitted from the wire (pre-#471 byte-stability).
         let raw_dag = RawDagPayload {
             nodes: vec![
                 RawDagNodePayload {
@@ -8601,18 +8949,55 @@ mod tests {
                     presence: "compiled_out",
                 },
             ],
+            edges: Vec::new(),
         };
         let json = serde_json::to_string(&raw_dag).unwrap();
         assert_eq!(
             json,
             r#"{"nodes":[{"id":"a","role":"cte","is_zone":false,"presence":"compiled_in"},{"id":"zone:0","role":"zone","is_zone":true,"presence":"compiled_out"}]}"#
         );
+        // cute-dbt#471 (S3): a raw_dag WITH edges serializes the edges array.
+        let raw_dag_edged = RawDagPayload {
+            nodes: vec![RawDagNodePayload {
+                id: "a".to_owned(),
+                role: "cte",
+                is_zone: false,
+                presence: "compiled_in",
+            }],
+            edges: vec![RawDagEdgePayload {
+                from: "a".to_owned(),
+                to: "b".to_owned(),
+                confidence: "resolved",
+            }],
+        };
+        let json = serde_json::to_string(&raw_dag_edged).unwrap();
+        assert_eq!(
+            json,
+            r#"{"nodes":[{"id":"a","role":"cte","is_zone":false,"presence":"compiled_in"}],"edges":[{"from":"a","to":"b","confidence":"resolved"}]}"#
+        );
+        // node_map.compiled is a flat compiledId→rawId map; node_map.raw is a flat
+        // rawId→[compiledId…] map. Both omit-when-empty (byte-stability).
         let mut compiled = BTreeMap::new();
         compiled.insert("a".to_owned(), "a".to_owned());
         compiled.insert("eu_sales".to_owned(), "zone:0".to_owned());
-        let node_map = NodeMapPayload { compiled };
+        let node_map = NodeMapPayload {
+            compiled,
+            raw: BTreeMap::new(),
+        };
         let json = serde_json::to_string(&node_map).unwrap();
         assert_eq!(json, r#"{"compiled":{"a":"a","eu_sales":"zone:0"}}"#);
+        // With BOTH halves: compiled (N→1) + raw (1→N, observed, incl. [] zone).
+        let mut compiled = BTreeMap::new();
+        compiled.insert("a".to_owned(), "a".to_owned());
+        let mut raw = BTreeMap::new();
+        raw.insert("a".to_owned(), vec!["a".to_owned()]);
+        raw.insert("zone:0".to_owned(), Vec::<String>::new());
+        let node_map = NodeMapPayload { compiled, raw };
+        let json = serde_json::to_string(&node_map).unwrap();
+        assert_eq!(
+            json,
+            r#"{"compiled":{"a":"a"},"raw":{"a":["a"],"zone:0":[]}}"#
+        );
     }
 
     #[test]
@@ -8640,6 +9025,450 @@ mod tests {
             !json.contains("node_map"),
             "node_map key absent on the wire"
         );
+    }
+
+    // ── cute-dbt#471 (S3): raw_dag.edges + node_map.raw (1→N, observed) ───────
+    //
+    // These build the SourceMap through the REAL path (parse_cte_graph →
+    // append_zone_entries → fill_raw_spans → from_source_map_with_raw) so the
+    // raw spans / zones / extents are scanned, NOT hand-authored — the discipline
+    // the S2 rescope flagged (hand-authored extents masked the real bug).
+
+    /// Assemble the model payload's `code_map` the SAME way `build_model_payload`
+    /// does (the real raw-span + zone scan path), threading `raw` so edges +
+    /// `node_map.raw` are derived. `(raw, compiled)` are the model's verbatim
+    /// `raw_code` / `compiled_code`.
+    fn code_map_through_real_path(raw: &str, compiled: &str) -> CodeMapPayload {
+        let graph = parse_cte_graph(compiled).unwrap_or_default();
+        let mut sm =
+            SourceMap::from_cte_graph(&graph, compiled, TERMINAL_NODE_NAME).expect("source map");
+        append_zone_entries(&mut sm, raw, compiled);
+        crate::adapters::raw_scan::fill_raw_spans(&mut sm, raw);
+        CodeMapPayload::from_source_map_with_raw(&sm, Some(raw))
+    }
+
+    #[test]
+    fn explicit_from_sibling_emits_a_resolved_edge() {
+        // Two verbatim CTEs, the second naming the first after a bare `from` in
+        // UN-templated text ⇒ exactly one resolved edge base → derived.
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  select id from base\n)\nselect * from derived";
+        // The compiled form keeps both CTEs verbatim (no Jinja in this model).
+        let compiled = raw;
+        let payload = code_map_through_real_path(raw, compiled);
+        let raw_dag = payload.raw_dag.expect("raw_dag present");
+        assert_eq!(raw_dag.edges.len(), 1, "exactly one explicit edge");
+        let e = &raw_dag.edges[0];
+        assert_eq!(e.from, "base");
+        assert_eq!(e.to, "derived");
+        assert_eq!(
+            e.confidence, "resolved",
+            "a lexically-explicit `from sibling` is resolved"
+        );
+    }
+
+    #[test]
+    fn ref_mediated_dependency_emits_no_edge() {
+        // The `derived` CTE depends on `base` ONLY through `{{ ref('base_model') }}`
+        // — masked to whitespace before the scan ⇒ NO edge (the pane shows it
+        // unresolved, never a guessed edge). `base` is still a verbatim CTE node.
+        let raw = "with base as (\n  select id from {{ source('s','t') }}\n),\nderived as (\n  select id from {{ ref('base_model') }}\n)\nselect * from derived";
+        // Compiled: the refs rendered to relations; the CTE bodies no longer name
+        // `base` lexically (the dependency went through ref()).
+        let compiled = "with base as (\n  select id from \"db\".\"s\".\"t\"\n),\nderived as (\n  select id from \"db\".\"main\".\"base_model\"\n)\nselect * from derived";
+        let payload = code_map_through_real_path(raw, compiled);
+        let raw_dag = payload.raw_dag.expect("raw_dag present");
+        assert!(
+            raw_dag.edges.is_empty(),
+            "a ref()-mediated dependency emits NO edge (masked away), never a guess"
+        );
+        // The `edges` key is omitted from the wire when empty (byte-stability).
+        let json = serde_json::to_string(&raw_dag).unwrap();
+        assert!(
+            !json.contains("\"edges\""),
+            "empty edges omitted from the wire"
+        );
+    }
+
+    #[test]
+    fn for_loop_mediated_dependency_emits_no_edge() {
+        // A `{% for %}`-templated `from {{ prev }}` is masked away ⇒ NO edge.
+        let raw = "with base as (\n  select 1 as id\n),\nstep as (\n  {% for prev in ['base'] %}\n  select id from {{ prev }}\n  {% endfor %}\n)\nselect * from step";
+        let compiled = "with base as (\n  select 1 as id\n),\nstep as (\n  select id from base\n)\nselect * from step";
+        let payload = code_map_through_real_path(raw, compiled);
+        let raw_dag = payload.raw_dag.expect("raw_dag present");
+        assert!(
+            raw_dag.edges.is_empty(),
+            "a {{% for %}}-mediated dependency is masked ⇒ NO edge"
+        );
+    }
+
+    #[test]
+    fn literal_from_inside_an_incremental_guard_emits_no_edge_through_render() {
+        // The honesty fix THROUGH THE REAL RENDER PATH (cute-dbt#471): a LITERAL,
+        // un-templated `from base` inside `{% if is_incremental() %}` is CONDITIONAL
+        // — on this FULL-REFRESH compiled build the guard is pruned and `from base`
+        // is ABSENT from compiled. Masking blanks the `{% if %}`/`{% endif %}` TAGS
+        // but leaves the body's `from base` live; the edge path's control-block
+        // exclusion suppresses it ⇒ NO edge (never a `resolved` false claim).
+        let raw = "with base as (\n  select id from src\n),\nderived as (\n  {% if is_incremental() %}\n  select id from base\n  {% endif %}\n)\nselect * from derived";
+        let compiled =
+            "with base as (\n  select id from src\n),\nderived as (\n  \n)\nselect * from derived";
+        let payload = code_map_through_real_path(raw, compiled);
+        let raw_dag = payload.raw_dag.expect("raw_dag present");
+        assert!(
+            raw_dag.edges.is_empty(),
+            "a guarded literal `from base` emits NO edge through the render path"
+        );
+        // The empty edges key stays off the wire (byte-stability).
+        let json = serde_json::to_string(&raw_dag).unwrap();
+        assert!(
+            !json.contains("\"edges\""),
+            "empty edges omitted from the wire"
+        );
+        // Honesty proof: the compiled build genuinely lacks `from base`, so a
+        // `resolved` edge would have had no compiled counterpart.
+        assert!(
+            !compiled.contains("from base"),
+            "full-refresh compiled has no `from base` — the suppressed edge is unbacked"
+        );
+    }
+
+    #[test]
+    fn a_name_inside_a_string_or_comment_is_not_an_edge_endpoint() {
+        // `derived` mentions `base` ONLY inside a string literal and a comment —
+        // both masked ⇒ NO edge. The bare `from external_rel` is not a sibling CTE.
+        let raw = "with base as (\n  select 1 as id\n),\nderived as (\n  select 'from base' as note -- really from base\n  , id from external_rel\n)\nselect * from derived";
+        let compiled = raw;
+        let payload = code_map_through_real_path(raw, compiled);
+        let raw_dag = payload.raw_dag.expect("raw_dag present");
+        assert!(
+            raw_dag.edges.is_empty(),
+            "`base` only inside a string/comment is masked ⇒ not an edge endpoint"
+        );
+    }
+
+    #[test]
+    fn verbatim_cte_node_map_raw_is_one_to_one_when_compiled_in() {
+        // A verbatim CTE compiled IN ⇒ node_map.raw[id] == [id] (the observed 1→1).
+        let raw = "with base as (\n  select id from src\n)\nselect * from base";
+        let compiled = raw;
+        let payload = code_map_through_real_path(raw, compiled);
+        let node_map = payload.node_map.expect("node_map present");
+        assert_eq!(
+            node_map.raw.get("base").map(Vec::as_slice),
+            Some(["base".to_owned()].as_slice()),
+            "a compiled-in verbatim CTE maps to [its own compiled id]"
+        );
+    }
+
+    #[test]
+    fn observed_for_loop_fan_out_lists_all_n_via_the_real_compiled_dag() {
+        // THE HEADLINE AC. A `{% for %}` loop fans out N compiled CTEs whose names
+        // are NOT verbatim in raw (only the `{{ region }}_sales` template is). The
+        // zone's compiled EXTENT is boundary-anchored from the literal text BEFORE
+        // (the `base` CTE) and AFTER (the terminal select) the loop; the OBSERVED
+        // fan-out is the compiled CTEs structurally inside that extent — read off
+        // the ACTUAL compiled DAG, never enumerated from the raw loop.
+        let raw = "with base as (\n  select region, amount from src\n),\n{% for region in ['us','eu'] %}\n{{ region }}_sales as (\n  select amount from base where region = '{{ region }}'\n),\n{% endfor %}\nfinal as (\n  select * from base\n)\nselect * from final";
+        // The compiled form: the loop expanded to us_sales + eu_sales between the
+        // verbatim `base` CTE and the verbatim `final` CTE.
+        let compiled = "with base as (\n  select region, amount from src\n),\nus_sales as (\n  select amount from base where region = 'us'\n),\neu_sales as (\n  select amount from base where region = 'eu'\n),\nfinal as (\n  select * from base\n)\nselect * from final";
+        let payload = code_map_through_real_path(raw, compiled);
+        let node_map = payload.node_map.expect("node_map present");
+        // The ONE loop zone's raw node observes BOTH fanned compiled CTEs (all N).
+        let zone_observed = node_map
+            .raw
+            .get("zone:0")
+            .expect("the loop zone node_map.raw key is present (extent anchored)");
+        assert_eq!(
+            zone_observed,
+            &vec!["eu_sales".to_owned(), "us_sales".to_owned()],
+            "the observed fan-out lists ALL N compiled CTEs in the extent (sorted)"
+        );
+        // node_map.compiled backfills N→1: each fanned CTE → the zone raw node.
+        assert_eq!(
+            node_map.compiled.get("us_sales").map(String::as_str),
+            Some("zone:0"),
+            "us_sales backfills to its owning zone (N→1)"
+        );
+        assert_eq!(
+            node_map.compiled.get("eu_sales").map(String::as_str),
+            Some("zone:0")
+        );
+        // The verbatim CTEs map 1→1 (identity); they are NOT swallowed by the zone.
+        assert_eq!(
+            node_map.compiled.get("base").map(String::as_str),
+            Some("base")
+        );
+        assert_eq!(
+            node_map.compiled.get("final").map(String::as_str),
+            Some("final")
+        );
+        assert_eq!(
+            node_map.raw.get("base").map(Vec::as_slice),
+            Some(["base".to_owned()].as_slice())
+        );
+    }
+
+    #[test]
+    fn compiled_out_raw_node_maps_to_empty_list_key_present_distinct_from_absent() {
+        // The incremental-guard dogfood shape: a `{% if is_incremental() %}` zone
+        // pruned THIS build ⇒ node_map.raw[zone] == [] (KEY PRESENT — "zero
+        // compiled nodes this build"), DISTINCT from an absent key. The verbatim
+        // `base` CTE is compiled-in and maps 1→1.
+        let raw = "with base as (\n  select id from src\n)\n{% if is_incremental() %}\n, recent as (\n  select id from base where id > 0\n)\n{% endif %}\nselect * from base";
+        // Fresh-build compile: the guard body PRUNED.
+        let compiled = "with base as (\n  select id from src\n)\nselect * from base";
+        let payload = code_map_through_real_path(raw, compiled);
+        let node_map = payload.node_map.expect("node_map present");
+        // The pruned guard zone is KEY PRESENT with [] (compiled out this build).
+        assert!(
+            node_map.raw.contains_key("zone:0"),
+            "the compiled-out zone key is PRESENT (the positive zero-this-build claim)"
+        );
+        assert_eq!(
+            node_map.raw.get("zone:0").map(Vec::as_slice),
+            Some([].as_slice()),
+            "a compiled-out zone maps to [] — never a guessed member"
+        );
+        // DISTINCT from absent: a non-existent raw node has NO key.
+        assert!(
+            !node_map.raw.contains_key("zone:99"),
+            "an absent key means no such raw node (distinct from the [] claim)"
+        );
+        // The verbatim base CTE is observed 1→1.
+        assert_eq!(
+            node_map.raw.get("base").map(Vec::as_slice),
+            Some(["base".to_owned()].as_slice())
+        );
+    }
+
+    #[test]
+    fn multi_cte_zone_extent_lists_exactly_the_fanned_ctes_never_swallows_siblings() {
+        // A `{% for %}` loop with a verbatim CTE BOTH before (`base`) and after
+        // (`dummy`) it: the boundary-anchored extent brackets ONLY the fanned
+        // CTEs, never swallowing the sibling `dummy` CTE that follows the loop.
+        let raw = "with base as (\n  select amount from src\n),\n{% for region in ['us','eu'] %}\n{{ region }}_sales as (\n  select amount from base where region = '{{ region }}'\n),\n{% endfor %}\ndummy as (\n  select amount from base\n)\nselect amount from dummy";
+        let compiled = "with base as (\n  select amount from src\n),\nus_sales as (\n  select amount from base where region = 'us'\n),\neu_sales as (\n  select amount from base where region = 'eu'\n),\ndummy as (\n  select amount from base\n)\nselect amount from dummy";
+        let payload = code_map_through_real_path(raw, compiled);
+        let node_map = payload.node_map.expect("node_map present");
+        // The extent brackets exactly us_sales + eu_sales — NOT base, NOT dummy.
+        assert_eq!(
+            node_map.raw.get("zone:0").map(Vec::as_slice),
+            Some(["eu_sales".to_owned(), "us_sales".to_owned()].as_slice()),
+            "the extent lists exactly the fanned CTEs, never swallowing siblings"
+        );
+        // The sibling verbatim CTEs map 1→1, NOT to the zone.
+        assert_eq!(
+            node_map.compiled.get("base").map(String::as_str),
+            Some("base")
+        );
+        assert_eq!(
+            node_map.compiled.get("dummy").map(String::as_str),
+            Some("dummy"),
+            "the post-loop `dummy` CTE is NOT swallowed into the zone extent"
+        );
+        assert_eq!(
+            node_map.compiled.get("us_sales").map(String::as_str),
+            Some("zone:0")
+        );
+    }
+
+    // ── cute-dbt#471 Finding C (CodeRabbit Major, never-a-false-claim): the
+    // zone NODE's presence is DERIVED from the extent fold, so it can never
+    // contradict `node_map.raw` membership. The pre-fix code set presence from
+    // the LEGACY in-zone anchor (`entry.presence`) BEFORE the fold ran — for a
+    // fan-out whose body literals REPEAT, that anchor is ambiguous ⇒ the node
+    // claimed `compiled_out` while `node_map.raw[zone]` listed proven members. ──
+
+    /// The smallest helper: a zone raw node's emitted presence by id.
+    fn zone_presence(payload: &CodeMapPayload, zone_id: &str) -> Option<String> {
+        payload.raw_dag.as_ref().and_then(|d| {
+            d.nodes
+                .iter()
+                .find(|n| n.is_zone && n.id == zone_id)
+                .map(|n| n.presence.to_owned())
+        })
+    }
+
+    #[test]
+    fn fan_out_zone_presence_is_compiled_in_consistent_with_nonempty_members() {
+        // A `{% for %}` fan-out whose body literal is BYTE-IDENTICAL per iteration
+        // (`select amount from base` — no per-iteration value) compiles to two CTEs
+        // (us_sales, eu_sales) whose bodies are identical text. The legacy in-zone
+        // anchor therefore occurs MULTIPLY in compiled ⇒ ambiguous ⇒ the old code's
+        // `entry.presence` was `compiled_out`. The boundary-anchored extent still
+        // proves BOTH members. The fix derives presence FROM the fold ⇒ compiled_in,
+        // consistent with the non-empty `node_map.raw[zone:0]`.
+        let raw = "with base as (\n  select amount from src\n),\n{% for region in ['us','eu'] %}\n{{ region }}_sales as (\n  select amount from base\n),\n{% endfor %}\nfinal as (\n  select amount from base\n)\nselect amount from final";
+        let compiled = "with base as (\n  select amount from src\n),\nus_sales as (\n  select amount from base\n),\neu_sales as (\n  select amount from base\n),\nfinal as (\n  select amount from base\n)\nselect amount from final";
+        let payload = code_map_through_real_path(raw, compiled);
+        let node_map = payload.node_map.as_ref().expect("node_map present");
+        // The extent fold proves both fanned CTEs are inside zone:0.
+        let members = node_map
+            .raw
+            .get("zone:0")
+            .expect("the loop zone node_map.raw key is present (extent anchored)");
+        assert_eq!(
+            members,
+            &vec!["eu_sales".to_owned(), "us_sales".to_owned()],
+            "the boundary-anchored extent proves both fanned CTEs as members"
+        );
+        // CONSISTENCY (Finding C): the zone NODE is compiled_in, NOT compiled_out,
+        // because it provably produced compiled CTEs — never the self-contradiction
+        // of `compiled_out` + non-empty members.
+        assert_eq!(
+            zone_presence(&payload, "zone:0").as_deref(),
+            Some("compiled_in"),
+            "a fan-out zone with proven members is compiled_in (NOT the legacy \
+             ambiguous-anchor compiled_out)"
+        );
+        // The cross-cutting invariant: NEVER compiled_out with non-empty members.
+        assert_node_map_presence_consistent(&payload);
+    }
+
+    #[test]
+    fn pruned_guard_zone_presence_is_compiled_out_consistent_with_empty_members() {
+        // A `{% if is_incremental() %}` guard PRUNED this build, bracketed by a
+        // verbatim `base` CTE (before) and the terminal select (after): the extent
+        // anchors soundly to an EMPTY region ⇒ `node_map.raw[zone:0] == []`. The
+        // zone NODE presence is DERIVED to compiled_out, consistent with `[]`.
+        let raw = "with base as (\n  select id from src\n)\n{% if is_incremental() %}\n, recent as (\n  select id from base where id > 0\n)\n{% endif %}\nselect * from base";
+        let compiled = "with base as (\n  select id from src\n)\nselect * from base";
+        let payload = code_map_through_real_path(raw, compiled);
+        let node_map = payload.node_map.as_ref().expect("node_map present");
+        assert_eq!(
+            node_map.raw.get("zone:0").map(Vec::as_slice),
+            Some([].as_slice()),
+            "a sound-but-empty extent is the honest [] (KEY PRESENT)"
+        );
+        assert_eq!(
+            zone_presence(&payload, "zone:0").as_deref(),
+            Some("compiled_out"),
+            "a sound-empty-extent zone is compiled_out, consistent with the [] members"
+        );
+        assert_node_map_presence_consistent(&payload);
+    }
+
+    /// The Finding-C invariant, asserted over a whole payload: a zone raw node is
+    /// NEVER `compiled_out` while `node_map.raw[its id]` is a NON-EMPTY list, and a
+    /// `compiled_in` zone is never `node_map.raw == []`. (Tri-state consistency:
+    /// non-empty ⟺ `compiled_in`; `[]` ⟺ `compiled_out`; absent ⟺ omitted.)
+    fn assert_node_map_presence_consistent(payload: &CodeMapPayload) {
+        let Some(raw_dag) = payload.raw_dag.as_ref() else {
+            return;
+        };
+        let raw_map = payload.node_map.as_ref().map(|m| &m.raw);
+        for node in raw_dag.nodes.iter().filter(|n| n.is_zone) {
+            let members = raw_map.and_then(|m| m.get(&node.id));
+            match members {
+                Some(m) if !m.is_empty() => assert_eq!(
+                    node.presence, "compiled_in",
+                    "zone {} has non-empty members ⇒ must be compiled_in, was {}",
+                    node.id, node.presence
+                ),
+                Some(_) => assert_eq!(
+                    node.presence, "compiled_out",
+                    "zone {} has [] members ⇒ must be compiled_out, was {}",
+                    node.id, node.presence
+                ),
+                None => {} // omitted (unanchorable) zone ⇒ legacy presence, no claim
+            }
+        }
+    }
+
+    #[test]
+    fn nested_for_if_zone_omits_overlapping_owner_and_lists_innermost_only() {
+        // cute-dbt#471 Finding D (CodeRabbit Major): a FANNED compiled CTE
+        // structurally inside NESTED `{% for %} … {% if is_incremental() %} …
+        // {% endif %} … {% endfor %}` falls inside BOTH zone extents (both EMITTING
+        // zones: ForLoop + IncrementalGuard). The N→1 owner must NOT be a
+        // last-insert-wins guess — `only_recent` is claimed by >1 extent ⇒ OMITTED
+        // from node_map.compiled (ambiguous raw origin); the 1→N node_map.raw lists
+        // it ONLY under the INNERMOST containing zone (the tighter guard extent).
+        //
+        // The CTE name `{{ r }}_recent` is TEMPLATED (not verbatim in raw), so it
+        // is NOT a raw CTE node and genuinely reaches the zone-owner fold (a
+        // verbatim name would map 1→1 by identity and never test the overlap).
+        // Verbatim `lp`/`pp` inside the loop but OUTSIDE the guard make the guard
+        // extent STRICTLY TIGHTER than the for extent (innermost-wins, not the
+        // identical-extent tie). The guard is KEPT this build (compiles in).
+        let raw = "with base as (\n  select id from src\n),\n{% for r in ['only'] %}\nlp as (\n  select 1 as p\n),\n{% if is_incremental() %}\n{{ r }}_recent as (\n  select id from base where id > 0\n),\n{% endif %}\npp as (\n  select 2 as q\n),\n{% endfor %}\nfinal as (\n  select id from base\n)\nselect id from final";
+        let compiled = "with base as (\n  select id from src\n),\nlp as (\n  select 1 as p\n),\nonly_recent as (\n  select id from base where id > 0\n),\npp as (\n  select 2 as q\n),\nfinal as (\n  select id from base\n)\nselect id from final";
+        let payload = code_map_through_real_path(raw, compiled);
+        let node_map = payload.node_map.as_ref().expect("node_map present");
+        // TWO zone extents anchored (the for-loop + the incremental guard); a
+        // genuine overlap, not a vacuous single-zone case.
+        let zone_ids: Vec<&String> = node_map
+            .raw
+            .keys()
+            .filter(|k| k.starts_with("zone:"))
+            .collect();
+        assert!(
+            zone_ids.len() >= 2,
+            "the nested for+incremental-guard produced two zone extents (got {zone_ids:?})"
+        );
+        // N→1: `only_recent` is claimed by >1 zone extent ⇒ OMITTED from
+        // node_map.compiled (no key — ambiguous raw origin, never last-wins). It is
+        // also NOT a verbatim CTE, so identity mapping does not rescue it.
+        assert!(
+            !node_map.compiled.contains_key("only_recent"),
+            "a fanned CTE inside two nested zone extents is omitted from \
+             node_map.compiled (never last-wins), got {:?}",
+            node_map.compiled.get("only_recent")
+        );
+        // 1→N: `only_recent` is listed under EXACTLY ONE zone — the innermost
+        // (tightest-byte-span) extent, the inner incremental guard — never both.
+        let listing_zones: Vec<&String> = zone_ids
+            .iter()
+            .filter(|z| {
+                node_map
+                    .raw
+                    .get(**z)
+                    .is_some_and(|ms| ms.iter().any(|m| m == "only_recent"))
+            })
+            .copied()
+            .collect();
+        assert_eq!(
+            listing_zones.len(),
+            1,
+            "`only_recent` is listed under exactly the innermost zone, never \
+             double-claimed (listing zones: {listing_zones:?})"
+        );
+        // The innermost zone lists ONLY `only_recent` (the tight guard extent),
+        // proving it is the inner guard, not the wider for-loop.
+        let inner = listing_zones[0];
+        assert_eq!(
+            node_map.raw.get(inner).map(Vec::as_slice),
+            Some(["only_recent".to_owned()].as_slice()),
+            "the innermost zone lists exactly [only_recent] (the tight guard extent)"
+        );
+        // The OTHER zone (the wider for-loop) lists its own siblings but NOT
+        // `only_recent` (it ceded the inner CTE to the tighter guard).
+        let outer = zone_ids
+            .iter()
+            .find(|z| **z != inner)
+            .expect("the wider for-loop zone");
+        assert_eq!(
+            node_map.raw.get(*outer).map(Vec::as_slice),
+            Some(["lp".to_owned(), "pp".to_owned()].as_slice()),
+            "the wider zone lists its own siblings (lp/pp), never `only_recent`"
+        );
+        // The verbatim siblings still map 1→1 by identity, untouched by the
+        // overlap handling (lp/pp are each in only the for extent; the verbatim
+        // identity rule in build_node_map_compiled wins over the zone owner).
+        assert_eq!(node_map.compiled.get("lp").map(String::as_str), Some("lp"));
+        assert_eq!(node_map.compiled.get("pp").map(String::as_str), Some("pp"));
+        assert_eq!(
+            node_map.compiled.get("base").map(String::as_str),
+            Some("base")
+        );
+        assert_eq!(
+            node_map.compiled.get("final").map(String::as_str),
+            Some("final")
+        );
+        // Presence stays consistent with membership (Finding C invariant).
+        assert_node_map_presence_consistent(&payload);
     }
 
     #[test]

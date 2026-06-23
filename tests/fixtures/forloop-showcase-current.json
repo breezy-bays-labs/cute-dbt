@@ -1,0 +1,92 @@
+{
+ "metadata": {
+  "dbt_schema_version": "https://schemas.getdbt.com/dbt/manifest/v12.json",
+  "project_name": "analytics"
+ },
+ "nodes": {
+  "model.analytics.fct_region_totals": {
+   "name": "fct_region_totals",
+   "resource_type": "model",
+   "package_name": "analytics",
+   "unique_id": "model.analytics.fct_region_totals",
+   "original_file_path": "models/marts/fct_region_totals.sql",
+   "path": "marts/fct_region_totals.sql",
+   "checksum": {
+    "name": "sha256",
+    "checksum": "fafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafafa"
+   },
+   "compiled_code": "with base as (\n    select region, amount from \"memory\".\"main\".\"stg_sales\"\n),\n\nprepped as (\n    select region, amount from base\n),\n\nus_totals as (\n    select amount from prepped where region = 'us'\n),\n\neu_totals as (\n    select amount from prepped where region = 'eu'\n),\n\ncombined as (\n    select amount from prepped\n)\n\nselect amount from combined\n",
+   "raw_code": "{{ config(materialized='table') }}\n\nwith base as (\n    select region, amount from {{ ref('stg_sales') }}\n),\n\nprepped as (\n    select region, amount from base\n),\n\n{% for region in ['us', 'eu'] %}\n{{ region }}_totals as (\n    select amount from prepped where region = '{{ region }}'\n),\n{% endfor %}\n\ncombined as (\n    select amount from prepped\n)\n\nselect amount from combined\n",
+   "depends_on": {
+    "macros": [],
+    "nodes": [
+     "model.analytics.stg_sales"
+    ]
+   },
+   "config": {
+    "materialized": "table"
+   }
+  },
+  "model.analytics.stg_sales": {
+   "name": "stg_sales",
+   "resource_type": "model",
+   "package_name": "analytics",
+   "unique_id": "model.analytics.stg_sales",
+   "original_file_path": "models/staging/stg_sales.sql",
+   "path": "staging/stg_sales.sql",
+   "checksum": {
+    "name": "sha256",
+    "checksum": "5a1e55a1e55a1e55a1e55a1e55a1e55a1e55a1e55a1e55a1e55a1e55a1e55a1e5"
+   },
+   "compiled_code": "select region, amount from \"memory\".\"main\".\"raw_sales\"\n",
+   "raw_code": "select region, amount from {{ source('raw', 'raw_sales') }}\n",
+   "depends_on": {
+    "macros": [],
+    "nodes": []
+   },
+   "config": {}
+  }
+ },
+ "sources": {},
+ "macros": {},
+ "unit_tests": {
+  "unit_test.analytics.fct_region_totals.test_region_passthrough": {
+   "model": "fct_region_totals",
+   "given": [
+    {
+     "input": "ref('stg_sales')",
+     "rows": [
+      {
+       "region": "us",
+       "amount": "10"
+      }
+     ],
+     "format": "dict",
+     "fixture": null
+    }
+   ],
+   "expect": {
+    "rows": [
+     {
+      "amount": "10"
+     }
+    ],
+    "format": "dict",
+    "fixture": null
+   },
+   "name": "test_region_passthrough",
+   "resource_type": "unit_test",
+   "package_name": "analytics",
+   "path": "marts/unit_tests.yml",
+   "original_file_path": "models/marts/unit_tests.yml",
+   "unique_id": "unit_test.analytics.fct_region_totals.test_region_passthrough",
+   "depends_on": {
+    "macros": [],
+    "nodes": [
+     "model.analytics.fct_region_totals"
+    ]
+   },
+   "config": {}
+  }
+ }
+}

@@ -803,6 +803,30 @@ jobs:
             output: examples/incremental-showcase-report.html
             project_root: tests/fixtures/incremental-showcase-source
             experimental: ""
+          # cute-dbt#471 (epic #468, S3) — the GOLDEN raw-DAG `{% for %}`
+          # fan-out showcase. A dedicated minimal SYNTHETIC manifest (one
+          # `table` model + its staging dep) whose `fct_region_totals` raw_code
+          # carries verbatim `base`/`prepped`/`combined` CTEs AND a
+          # `{% for region in ['us','eu'] %}` loop, and whose compiled_code is
+          # the loop EXPANDED (us_totals + eu_totals). So the regenerated golden
+          # exercises S3: `raw_dag.edges` (lexically-explicit `from prepped` /
+          # `from base`, NOT the `{{ ref() }}`-mediated dep), `node_map.raw`'s
+          # OBSERVED fan-out `zone:0 → [eu_totals, us_totals]` (folded from the
+          # actual compiled DAG via the zone's boundary-anchored compiled EXTENT,
+          # never enumerated from the raw loop), and `node_map.compiled`
+          # backfilling each fanned CTE → the one zone raw node. The compiled
+          # manifest is hand-authored (never a real `dbt compile`), so it leaks
+          # no root_path/username (synthetic-only fixture invariant). Rendered in
+          # --pr-diff mode (a synthetic one-line edit marks the model in-scope).
+          # No baseline — the showcase is --pr-diff only.
+          - name: forloop-showcase
+            mode: report
+            current: tests/fixtures/forloop-showcase-current.json
+            baseline: ""
+            pr_diff: tests/fixtures/forloop-showcase-pr-diff.patch
+            output: examples/forloop-showcase-report.html
+            project_root: tests/fixtures/forloop-showcase-source
+            experimental: ""
           # cute-dbt#404 (epic #352) — the GOLDEN PR-scope lineage mini-DAG.
           # A dedicated minimal manifest with a CONNECTOR PATH
           # (stg_orders → int_order_items → fct_orders): stg_orders and

@@ -883,6 +883,85 @@ same-revision contract). Pure synthetic SQL — no real data.\
 """
 
 [[fixture]]
+path = "forloop-showcase-current.json"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/471"
+sha256 = "597728c3b13178d56956e218080ac027936839b6eb0fda7b1e8f50311910b074"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The SYNTHETIC manifest for the raw-DAG `{% for %}` fan-out GOLDEN \
+(cute-dbt#471, epic #468, S3). One `table`-materialized model \
+(`fct_region_totals`) + its staging dep (`stg_sales`). `fct_region_totals` \
+raw_code carries verbatim `base`/`prepped`/`combined` CTEs AND a \
+`{% for region in ['us','eu'] %}` loop that fans out `{{ region }}_totals` — so \
+the report's raw structural DAG exercises S3's headline surfaces: \
+`raw_dag.edges` (lexically-explicit `from prepped` / `from base`, never the \
+`{{ ref() }}`-mediated dep), `node_map.raw[zone:0]` = the OBSERVED fan-out \
+`[eu_totals, us_totals]` (folded from the ACTUAL compiled DAG, by the zone's \
+boundary-anchored compiled EXTENT — never enumerated from the raw loop), and \
+`node_map.compiled` backfilling each fanned CTE → the one zone raw node. The \
+compiled_code is HAND-AUTHORED (the loop expanded, the ref rendered), never \
+from a real `dbt compile`, so it leaks no root_path/username. Pure synthetic \
+data — generic region/amount columns, no real records.\
+"""
+
+[[fixture]]
+path = "forloop-showcase-pr-diff.patch"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/471"
+sha256 = "4f3988209bf31de5b6f169abfc0ec106c4ef4fee75de45a4d2f5569dee222b4e"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The hand-crafted PR diff for the forloop-showcase GOLDEN (cute-dbt#471). A \
+synthetic one-line edit to `models/marts/fct_region_totals.sql` so the model \
+lands in --pr-diff scope and its raw structural DAG (edges + observed fan-out) \
+renders in the golden. No baseline — the showcase is --pr-diff only. Synthetic, \
+no real records.\
+"""
+
+[[fixture]]
+path = "forloop-showcase-source/models/marts/fct_region_totals.sql"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/471"
+sha256 = "de542e0eadb8e251fcab92172034aacd07bd5328d1747852ca05f383923c836c"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The working-tree MODEL SQL for the forloop-showcase GOLDEN (cute-dbt#471). A \
+synthetic `table` model whose verbatim `base`/`prepped`/`combined` CTEs bracket \
+a `{% for region in ['us','eu'] %}` fan-out loop — byte-aligned to the \
+committed `model.analytics.fct_region_totals` raw_code in \
+forloop-showcase-current.json (the same-revision contract), so reading it \
+through `--project-root tests/fixtures/forloop-showcase-source` matches the \
+manifest. The `prepped` CTE precedes the loop and `combined` follows it, giving \
+the loop zone clean verbatim before/after boundary anchors so its compiled \
+EXTENT (and thus the observed fan-out) resolves soundly. The \
+forloop-showcase-pr-diff.patch carries an edit hunk against this file so the \
+model lands in --pr-diff scope. Pure synthetic SQL — no real data.\
+"""
+
+[[fixture]]
+path = "forloop-showcase-source/models/staging/stg_sales.sql"
+origin = "synthetic-handcrafted"
+origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/471"
+sha256 = "936c1037b52bdb0bd5c07818e12889fd72bd4d3308f70d9ac2caddfa6527b71b"
+synthetic_only = true
+synthetic_handcrafted = true
+license = "MIT"
+description = """
+The working-tree staging SQL for the forloop-showcase GOLDEN (cute-dbt#471). A \
+synthetic staging model (`stg_sales`) the `fct_region_totals` model `ref()`s — \
+byte-aligned to the committed `model.analytics.stg_sales` raw_code in \
+forloop-showcase-current.json (the same-revision contract). Pure synthetic SQL \
+— no real data.\
+"""
+
+[[fixture]]
 path = "prdiff-minidag-current.json"
 origin = "synthetic-handcrafted"
 origin_url = "https://github.com/breezy-bays-labs/cute-dbt/issues/404"
