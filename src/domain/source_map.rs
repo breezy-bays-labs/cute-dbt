@@ -318,6 +318,45 @@ impl SourceMap {
             })
             .collect()
     }
+
+    /// The RAW-coordinate `CteBody` node-span table (cute-dbt#469, S1) — the
+    /// raw twin of [`Self::node_spans`]. Every entry whose role is `CteBody` and
+    /// whose `raw` span is present (filled by the `raw_scan` adapter on a unique
+    /// lexical match), keyed by node id. A node whose raw origin was not
+    /// uniquely anchored carries no `raw` span and is OMITTED — the
+    /// unique-match-only honesty contract surfaces as an absent key, never a
+    /// picked offset. The render projection (`CodeMapPayload.raw_node_spans`) is
+    /// this map (omit-when-empty serde), so a model with no resolvable raw CTE
+    /// stays byte-stable on the wire.
+    #[must_use]
+    pub fn raw_node_spans(&self) -> std::collections::BTreeMap<String, SourceSpan> {
+        self.entries
+            .iter()
+            .filter_map(|e| match (&e.role, e.raw) {
+                (SpanRole::CteBody { node_id }, Some(r)) => Some((node_id.clone(), r)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The RAW-coordinate `Column` span table (cute-dbt#469, S1) — the raw twin
+    /// of [`Self::column_spans`]. Every entry whose role is `Column` and whose
+    /// `raw` span is present, keyed by `(node_id, column)`. A templated /
+    /// macro-expanded / ambiguous column carries no `raw` span and is OMITTED
+    /// (no sound raw region). The render projection
+    /// (`CodeMapPayload.raw_column_spans`) is this map (omit-when-empty serde).
+    #[must_use]
+    pub fn raw_column_spans(&self) -> std::collections::BTreeMap<(String, String), SourceSpan> {
+        self.entries
+            .iter()
+            .filter_map(|e| match (&e.role, e.raw) {
+                (SpanRole::Column { node_id, column }, Some(r)) => {
+                    Some(((node_id.clone(), column.clone()), r))
+                }
+                _ => None,
+            })
+            .collect()
+    }
 }
 
 /// A [`SourceSpan`] over the whole `[0, text.len())` of `text`, with honest
@@ -876,5 +915,68 @@ mod tests {
                 .any(|e| matches!(e.role, SpanRole::Column { .. })),
             "no Column entries without column spans"
         );
+    }
+
+    // ── cute-dbt#469 (S1): raw-coordinate span projections ──
+    #[test]
+    fn raw_node_and_column_spans_project_filled_raw_entries_only() {
+        // Two CteBody entries: one with a raw span, one without; a Column entry
+        // with a raw span. The raw projections include ONLY the entries whose
+        // `raw` is Some (the unique-match-only fill); the unfilled one is OMITTED.
+        let sm = SourceMap {
+            compiled: "with a as (select 1) select x from a".to_owned(),
+            entries: vec![
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: "a".to_owned(),
+                    },
+                    raw: Some(span(5, 20)),
+                    compiled: Some(span(5, 20)),
+                },
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: TERMINAL.to_owned(),
+                    },
+                    raw: None, // terminal omitted in S1 (no verbatim name token)
+                    compiled: Some(span(21, 36)),
+                },
+                SourceMapEntry {
+                    role: SpanRole::Column {
+                        node_id: TERMINAL.to_owned(),
+                        column: "x".to_owned(),
+                    },
+                    raw: Some(span(28, 29)),
+                    compiled: Some(span(28, 29)),
+                },
+            ],
+        };
+        let rns = sm.raw_node_spans();
+        assert_eq!(rns.len(), 1, "only the raw-filled CteBody projects");
+        assert_eq!(rns.get("a"), Some(&span(5, 20)));
+        assert!(!rns.contains_key(TERMINAL), "raw-less terminal is omitted");
+
+        let rcs = sm.raw_column_spans();
+        assert_eq!(rcs.len(), 1);
+        assert_eq!(
+            rcs.get(&(TERMINAL.to_owned(), "x".to_owned())),
+            Some(&span(28, 29))
+        );
+    }
+
+    #[test]
+    fn raw_spans_empty_when_no_raw_filled() {
+        // Honest absence: from_cte_graph leaves every raw: None (no scanner run),
+        // so both raw projections are empty (wire stays byte-stable).
+        let compiled = "with a as (select 1) select * from a";
+        let graph = CteGraph::new(
+            vec![
+                cte("a", span(5, 20), "a as (select 1)"),
+                cte(TERMINAL, span(21, 36), "select * from a"),
+            ],
+            vec![],
+        );
+        let sm = SourceMap::from_cte_graph(&graph, compiled, TERMINAL).unwrap();
+        assert!(sm.raw_node_spans().is_empty());
+        assert!(sm.raw_column_spans().is_empty());
     }
 }

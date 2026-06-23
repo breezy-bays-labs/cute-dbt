@@ -352,6 +352,20 @@ pub struct CodeMapPayload {
     /// goldens stay byte-stable.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub column_spans: BTreeMap<String, SourceSpan>,
+    /// Derived: the RAW-coordinate `CteBody` node-span table (cute-dbt#469, S1)
+    /// — the raw twin of [`Self::node_spans`], filled by the `raw_scan` adapter
+    /// on a UNIQUE lexical match in the Jinja-masked raw text. A node whose raw
+    /// origin is not uniquely anchored is OMITTED (never a picked offset). Empty
+    /// (the whole key omitted) when no CTE resolves a raw span, so models
+    /// without verbatim CTEs stay byte-stable on the wire.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub raw_node_spans: BTreeMap<String, SourceSpan>,
+    /// Derived: the RAW-coordinate `Column` span table (cute-dbt#469, S1) — the
+    /// raw twin of [`Self::column_spans`], keyed `"node_id\u{1f}column"`. A
+    /// templated / macro-expanded / ambiguous column is OMITTED (no sound raw
+    /// region). Empty (omitted) until a column resolves a unique raw anchor.
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    pub raw_column_spans: BTreeMap<String, SourceSpan>,
 }
 
 impl CodeMapPayload {
@@ -371,11 +385,24 @@ impl CodeMapPayload {
             .into_iter()
             .map(|((node_id, column), span)| (format!("{node_id}\u{1f}{column}"), span))
             .collect();
+        // cute-dbt#469 (S1) — the raw-coordinate twins, read off the `e.raw`
+        // slot the `raw_scan` adapter filled (unique-match-only). Same shapes /
+        // same unit-separator key as their compiled twins, so the JS sync layer
+        // indexes them identically; omit-when-empty keeps pre-#469 goldens
+        // byte-stable.
+        let raw_node_spans = sm.raw_node_spans();
+        let raw_column_spans = sm
+            .raw_column_spans()
+            .into_iter()
+            .map(|((node_id, column), span)| (format!("{node_id}\u{1f}{column}"), span))
+            .collect();
         Self {
             compiled: sm.compiled.clone(),
             node_spans,
             raw_zones,
             column_spans,
+            raw_node_spans,
+            raw_column_spans,
         }
     }
 }
@@ -3647,7 +3674,10 @@ fn scan_block_tags(raw_code: &str) -> Option<Vec<BlockTag>> {
 /// Find the byte index PAST a `<delim>}` closer (e.g. `#}`) starting at `from`,
 /// scanning literally (comments do not respect string literals). Returns the
 /// index after the closing `}`, or `None` if unterminated.
-fn find_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
+///
+/// `pub(crate)` so the raw-span scanner (`raw_scan`) reuses this exact vetted
+/// scanner rather than carrying a divergent copy (cute-dbt#469).
+pub(crate) fn find_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
     let n = bytes.len();
     let mut i = from;
     while i + 1 < n {
@@ -3665,7 +3695,11 @@ fn find_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
 /// closing `}`, or `None` if unterminated. (The whitespace-control `-%}` is
 /// covered: the `%` then `}` still close; the leading `-` is just preceding
 /// content.)
-fn find_expr_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
+///
+/// `pub(crate)` so the raw-span scanner (`raw_scan`) reuses this exact vetted
+/// scanner — including the Jinja backslash string-escape — rather than carrying
+/// a divergent copy that previously DROPPED the escape (cute-dbt#469).
+pub(crate) fn find_expr_close(bytes: &[u8], from: usize, delim: u8) -> Option<usize> {
     let n = bytes.len();
     let mut i = from;
     let mut quote: Option<u8> = None;
@@ -3831,7 +3865,7 @@ fn classify_block_tag(tag: &str) -> TagRole {
 /// `text`, computing honest 1-based line/col endpoints by counting newlines.
 /// Returns `None` if the range is out of bounds or not on char boundaries
 /// (fail-closed — the scanner never fabricates a span).
-fn byte_span(text: &str, start: usize, end: usize) -> Option<SourceSpan> {
+pub(crate) fn byte_span(text: &str, start: usize, end: usize) -> Option<SourceSpan> {
     if start > end || end > text.len() {
         return None;
     }
@@ -4637,6 +4671,13 @@ fn build_model_payload(
     if let Some(sm) = source_map.as_mut() {
         if let Some(raw) = model.raw_code().filter(|s| !s.is_empty()) {
             append_zone_entries(sm, raw, compiled_code);
+            // cute-dbt#469 (S1) — fill the RAW span of every NON-zone CteBody /
+            // Column entry whose name resolves to a UNIQUE lexical anchor in the
+            // Jinja-masked raw text (the raw twin of the compiled node_spans /
+            // column_spans). Runs AFTER append_zone_entries so the zone path's
+            // raw spans are never overwritten (fill_raw_spans skips any entry
+            // that already carries a raw span); fail-closed on malformed Jinja.
+            crate::adapters::raw_scan::fill_raw_spans(sm, raw);
         }
     }
     let compiled_sql = build_compiled_sql(source_map.as_ref());
@@ -8166,6 +8207,114 @@ mod tests {
             matched, "and rare_marker_q > 0",
             "binds the UNIQUE fragment, not the first occurrence of the ambiguous one"
         );
+    }
+
+    // ── cute-dbt#469 (S1): raw_node_spans / raw_column_spans projection ──
+
+    #[test]
+    fn from_source_map_projects_raw_node_spans_for_a_verbatim_cte() {
+        // A verbatim WITH CTE: the raw_scan adapter fills its raw span; the
+        // projection surfaces it under raw_node_spans, keyed by node id. The
+        // terminal node has no verbatim name token → omitted in S1.
+        let raw = "with stg as (select 1 as id) select id from stg";
+        let compiled = "with stg as (select 1 as id) select id from stg";
+        let mut sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: "stg".to_owned(),
+                    },
+                    raw: None,
+                    compiled: byte_span(compiled, 5, 28),
+                },
+                SourceMapEntry {
+                    role: SpanRole::CteBody {
+                        node_id: TERMINAL_NODE_NAME.to_owned(),
+                    },
+                    raw: None,
+                    compiled: byte_span(compiled, 29, compiled.len()),
+                },
+            ],
+        };
+        crate::adapters::raw_scan::fill_raw_spans(&mut sm, raw);
+        let payload = CodeMapPayload::from_source_map(&sm);
+        let stg = payload
+            .raw_node_spans
+            .get("stg")
+            .expect("verbatim CTE emits a raw_node_spans entry");
+        assert_eq!(&raw[stg.byte_range()], "stg as (select 1 as id)");
+        assert!(
+            !payload.raw_node_spans.contains_key(TERMINAL_NODE_NAME),
+            "terminal node has no verbatim raw name token ⇒ omitted in S1"
+        );
+    }
+
+    #[test]
+    fn from_source_map_omits_raw_column_span_for_a_templated_column() {
+        // A column whose name appears ONLY inside a Jinja region is masked away
+        // → no unique anchor → the raw_column_spans key is OMITTED (never a
+        // fabricated offset). A sibling verbatim column DOES anchor.
+        let raw = "select {{ macro_col('templated_col') }}, plain_col from t";
+        let compiled = "select rendered, plain_col from t";
+        let key = |c: &str| format!("{TERMINAL_NODE_NAME}\u{1f}{c}");
+        let mut sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![
+                SourceMapEntry {
+                    role: SpanRole::Column {
+                        node_id: TERMINAL_NODE_NAME.to_owned(),
+                        column: "templated_col".to_owned(),
+                    },
+                    raw: None,
+                    compiled: byte_span(compiled, 7, 15),
+                },
+                SourceMapEntry {
+                    role: SpanRole::Column {
+                        node_id: TERMINAL_NODE_NAME.to_owned(),
+                        column: "plain_col".to_owned(),
+                    },
+                    raw: None,
+                    compiled: byte_span(compiled, 17, 26),
+                },
+            ],
+        };
+        crate::adapters::raw_scan::fill_raw_spans(&mut sm, raw);
+        let payload = CodeMapPayload::from_source_map(&sm);
+        assert!(
+            !payload.raw_column_spans.contains_key(&key("templated_col")),
+            "a templated column (masked away) ⇒ no raw_column_spans key"
+        );
+        let plain = payload
+            .raw_column_spans
+            .get(&key("plain_col"))
+            .expect("a verbatim column anchors uniquely");
+        assert_eq!(&raw[plain.byte_range()], "plain_col");
+    }
+
+    #[test]
+    fn from_source_map_raw_spans_empty_when_no_scanner_run() {
+        // Honest absence: from_cte_graph leaves every raw: None and (with no
+        // fill_raw_spans call) both raw projections are empty, so the wire (and
+        // the goldens) stay byte-stable for models without resolvable raw spans.
+        let compiled = "with a as (select 1) select * from a";
+        let sm = SourceMap {
+            compiled: compiled.to_owned(),
+            entries: vec![SourceMapEntry {
+                role: SpanRole::CteBody {
+                    node_id: "a".to_owned(),
+                },
+                raw: None,
+                compiled: byte_span(compiled, 5, 20),
+            }],
+        };
+        let payload = CodeMapPayload::from_source_map(&sm);
+        assert!(payload.raw_node_spans.is_empty());
+        assert!(payload.raw_column_spans.is_empty());
+        // The omit-when-empty serde keeps the key off the wire entirely.
+        let json = serde_json::to_string(&payload).unwrap();
+        assert!(!json.contains("raw_node_spans"));
+        assert!(!json.contains("raw_column_spans"));
     }
 
     // ── cute-dbt#448 FIX C (CodeRabbit Major, fail-closed): an orphan mid-block
