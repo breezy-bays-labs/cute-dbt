@@ -383,9 +383,15 @@ fn resolve_projection_item(
                 push_edges(node_id, &output, input, kind, edges);
                 push_span(node_id, &output, item, sql, index, spans);
             } else {
-                // An expression (coalesce/CASE/func) — honest absence: NO
-                // edge here (that is CLL-3). Still record the column span so
-                // the column→code sync can flash it.
+                // An expression (coalesce/CASE/func/arithmetic) — CLL-3
+                // (cute-dbt#449): collect every input column it reads and emit
+                // one `Derived` edge per input (many-to-one), depth-capped and
+                // degrading to Ambiguous honestly. Never a fabricated edge:
+                // an expression with no recoverable column ref emits none.
+                let collected = collect_derived_refs(expr);
+                for input in derived_input_cols(collected, aliases, sole_leaf) {
+                    push_edges(node_id, &output, input, ColumnEdgeKind::Derived, edges);
+                }
                 push_span(node_id, &output, item, sql, index, spans);
             }
             // The output NAME is known regardless of whether an edge was
@@ -559,6 +565,226 @@ fn direct_column_ref(
             })
         }
         _ => None,
+    }
+}
+
+// ---------------------------------------------------------------------
+// CLL-3 (cute-dbt#449) — expression provenance (`Derived` edges).
+//
+// `coalesce(a.x, b.y) AS z`, `CASE … END AS z`, `a.x + b.y AS s` — the
+// projection item is an EXPRESSION, not a direct column reference, so
+// `direct_column_ref` returns `None`. The CLL-3 walker collects every
+// column reference the expression reads and emits ONE `Derived` edge per
+// input (many-to-one).
+//
+// Honesty floor (never-a-false-claim):
+//   - A qualified input (`a.x`) ⇒ Resolved (the SQL named the relation).
+//   - An unqualified input (`x`) over a SOLE relation ⇒ Resolved; over a
+//     multi-relation FROM ⇒ fan out to every candidate, all Ambiguous.
+//   - The walk is DEPTH/COMPLEXITY-CAPPED. An AST past the cap (deeply
+//     nested parens/functions, `CASE WHEN EXISTS (…)`, …) degrades the
+//     WHOLE column's edges to Ambiguous and fans out the refs it COULD
+//     reach before the cap — NEVER a panic, NEVER a fabricated Resolved,
+//     NEVER a silent total drop. The cap mirrors the engine's posture:
+//     when the transform is too complex to attribute exactly, we still
+//     name the visible inputs but stop claiming the SQL was explicit.
+//
+// This is intra-model only (the same scope as CLL-2's pass-through edges);
+// cross-model trace-to-source is CLL-4 (#450).
+// ---------------------------------------------------------------------
+
+/// Maximum AST descent depth for the expression-provenance walk. A
+/// realistic dbt projection expression is a handful of nodes deep; this
+/// bound is generous for honest SQL yet finite, so a pathological /
+/// adversarial AST (deeply nested parens, recursive functions) cannot blow
+/// the stack or spin — it trips the cap and degrades. Chosen well above any
+/// hand-written transform and well below a stack-overflow risk.
+const DERIVED_DEPTH_CAP: u32 = 64;
+
+/// Maximum number of distinct input refs collected from one expression
+/// before the walk declares the expression too complex to attribute
+/// exactly. A wide `coalesce`/`CASE` is fine; a fan-out into hundreds of
+/// refs is a complexity signal that degrades to Ambiguous.
+const DERIVED_REF_CAP: usize = 64;
+
+/// One input column reference collected from a projection expression,
+/// either qualified (`a.x`) or bare (`x`).
+enum ExprRef {
+    /// `q.col` — the qualifier resolves through the alias map.
+    Qualified { qualifier: String, column: String },
+    /// `col` — unqualified; resolved against the sole relation or fanned out.
+    Bare { column: String },
+}
+
+/// The refs an expression reads, plus whether the descent hit the
+/// depth/complexity cap (which forces every resulting edge to Ambiguous).
+struct DerivedRefs {
+    refs: Vec<ExprRef>,
+    capped: bool,
+}
+
+/// Walk a projection EXPRESSION, collecting every column reference it reads
+/// (qualified or bare), depth-capped. Pure: no I/O, no shared mutation —
+/// it owns its accumulator and returns it. The `capped` flag rides out so
+/// the caller can degrade confidence honestly.
+fn collect_derived_refs(expr: &Expr) -> DerivedRefs {
+    let mut out = DerivedRefs {
+        refs: Vec::new(),
+        capped: false,
+    };
+    walk_derived_refs(expr, 0, &mut out);
+    out
+}
+
+/// The recursive descent behind [`collect_derived_refs`]. Appends a ref for
+/// every `Identifier` / `CompoundIdentifier` reached; descends the same
+/// expression shapes as [`collect_qualified_refs`] PLUS the bare-identifier
+/// case. Once `depth` exceeds [`DERIVED_DEPTH_CAP`] or the ref count exceeds
+/// [`DERIVED_REF_CAP`], it sets `capped` and stops descending that branch —
+/// it never recurses past the cap (no stack-overflow), and it keeps what it
+/// already saw (no silent total drop).
+fn walk_derived_refs(expr: &Expr, depth: u32, out: &mut DerivedRefs) {
+    if depth > DERIVED_DEPTH_CAP || out.refs.len() > DERIVED_REF_CAP {
+        out.capped = true;
+        return;
+    }
+    let next = depth + 1;
+    match expr {
+        // A qualified leaf — `a.x`.
+        Expr::CompoundIdentifier(_) => {
+            if let Some((qualifier, column)) = qualified_column(expr) {
+                out.refs.push(ExprRef::Qualified { qualifier, column });
+            }
+        }
+        // A bare leaf — `x` (CLL-3 reaches this; the correlation walker does
+        // not, since a bare identifier carries no qualifier).
+        Expr::Identifier(ident) => {
+            out.refs.push(ExprRef::Bare {
+                column: ident.value.to_ascii_lowercase(),
+            });
+        }
+        // An `EXISTS`/`IN`-subquery, OR a SCALAR `(SELECT …)` projection
+        // subquery, is a shape we do NOT attribute semantically — a
+        // complexity signal that trips the cap (degrade to Ambiguous) rather
+        // than silently claim full resolution. Refs already seen are kept
+        // (honest absence, never a silent total drop).
+        //
+        // A scalar `Expr::Subquery` is the load-bearing case (cute-dbt#449,
+        // CodeRabbit/verifier): its value comes from ANOTHER relation through
+        // the subquery — an honestly UNKNOWN intra-model source, NOT an input
+        // the projection reads. Descending its body (its correlated `WHERE` or
+        // its inner projection) would FABRICATE provenance: it would emit a
+        // Resolved edge from a PREDICATE column (`p.order_id`, never the value
+        // column `p.paid_at`) attributed to a PHANTOM relation that is not an
+        // intra-model DAG node. So we treat it EXACTLY like EXISTS/IN — never
+        // collect any of its internals. A pure-subquery projection
+        // (`(SELECT …) AS m`) thus yields NO intra-model Derived edge (Opaque /
+        // honest absence); a mixed projection (`coalesce(a.x, (SELECT …))`)
+        // trips the cap, degrading every produced edge — fanned out from ONLY
+        // the other top-level visible refs (`a.x`) — to Ambiguous. The
+        // correlation walker ([`collect_qualified_refs`]) still descends
+        // `Expr::Subquery` for its own (different) outer-correlation purpose;
+        // only THIS projection-provenance walker caps it. Cross-model trace
+        // into the inner relation is CLL-4 (#450).
+        Expr::Exists { .. } | Expr::InSubquery { .. } | Expr::Subquery(_) => {
+            out.capped = true;
+        }
+        // Every other shape descends over its shared child set (the SAME
+        // descent the correlation walker uses), depth-bounded.
+        _ => {
+            for child in expr_children(expr) {
+                walk_derived_refs(child, next, out);
+            }
+        }
+    }
+}
+
+/// Resolve the collected expression refs into `Derived` edges' [`InputCol`]s.
+/// Qualified refs resolve through `aliases`; bare refs resolve against the
+/// sole relation (Resolved) or fan out across every candidate (Ambiguous).
+/// When the walk was `capped`, EVERY produced edge degrades to Ambiguous —
+/// we still list the visible inputs (honest absence) but stop claiming the
+/// SQL was explicit. De-duplicated + deterministically ordered for goldens.
+fn derived_input_cols(
+    collected: DerivedRefs,
+    aliases: &HashMap<String, String>,
+    sole_leaf: Option<&str>,
+) -> Vec<InputCol> {
+    // (source_node, column) → confidence, de-duplicated + ordered.
+    let mut by_target: std::collections::BTreeMap<(String, String), ColumnEdgeConfidence> =
+        std::collections::BTreeMap::new();
+    let all_candidates: Vec<String> = aliases
+        .values()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let degrade = |c: ColumnEdgeConfidence| {
+        if collected.capped {
+            ColumnEdgeConfidence::Ambiguous
+        } else {
+            c
+        }
+    };
+    for r in collected.refs {
+        match r {
+            ExprRef::Qualified { qualifier, column } => {
+                let source = aliases.get(&qualifier).cloned().unwrap_or(qualifier);
+                let conf = degrade(ColumnEdgeConfidence::Resolved);
+                merge_max(&mut by_target, (source, column), conf);
+            }
+            ExprRef::Bare { column } => {
+                if let Some(leaf) = sole_leaf {
+                    let conf = degrade(ColumnEdgeConfidence::Resolved);
+                    merge_max(&mut by_target, (leaf.to_owned(), column), conf);
+                } else {
+                    // Multi-source (or zero-source) ⇒ fan out, Ambiguous.
+                    for cand in &all_candidates {
+                        merge_max(
+                            &mut by_target,
+                            (cand.clone(), column.clone()),
+                            ColumnEdgeConfidence::Ambiguous,
+                        );
+                    }
+                }
+            }
+        }
+    }
+    by_target
+        .into_iter()
+        .map(|((source, column), confidence)| InputCol {
+            candidates: vec![source],
+            column,
+            confidence,
+        })
+        .collect()
+}
+
+/// Insert/merge one resolved target, keeping the WEAKER (more honest)
+/// confidence when the same `(source, column)` is reached twice — a column
+/// that appears once qualified and once unqualified-ambiguous stays
+/// Ambiguous, never silently upgraded to Resolved.
+fn merge_max(
+    map: &mut std::collections::BTreeMap<(String, String), ColumnEdgeConfidence>,
+    key: (String, String),
+    conf: ColumnEdgeConfidence,
+) {
+    let entry = map.entry(key).or_insert(conf);
+    if confidence_rank(conf) > confidence_rank(*entry) {
+        *entry = conf;
+    }
+}
+
+/// Honesty ordering: a HIGHER rank is the MORE-degraded (weaker) claim, so
+/// `merge_max` keeps the weakest. Opaque is weakest, then Ambiguous, then
+/// Resolved. Exhaustive on purpose (no wildcard): a future
+/// `ColumnEdgeConfidence` variant MUST be consciously ranked here — the
+/// compile error is the reminder, never a silent maximal-degrade default.
+fn confidence_rank(c: ColumnEdgeConfidence) -> u8 {
+    match c {
+        ColumnEdgeConfidence::Resolved => 0,
+        ColumnEdgeConfidence::Ambiguous => 1,
+        ColumnEdgeConfidence::Opaque => 2,
     }
 }
 
@@ -1089,39 +1315,81 @@ fn correlated_equi_pair(
 /// Append every qualified column reference under `expr`, descending
 /// the predicate shapes correlated anti-join `WHERE`s realistically
 /// use (AND/OR trees, comparisons, IS \[NOT\] NULL, BETWEEN, IN lists,
-/// LIKE, CAST, parens, unary NOT). Unknown variants are deliberately
-/// not descended: a correlation reference hidden in an exotic shape
-/// yields no evidence, so the fact is not emitted — silence, never
-/// misclassification.
+/// LIKE, CAST, parens, unary NOT) plus — since CLL-3 (cute-dbt#449) —
+/// `Function`/`Case`/`Subquery` argument expressions. A qualified ref
+/// nested inside a function or CASE branch is now FOUND (strictly more
+/// correlation evidence, never less). Bare `Identifier`s carry no
+/// qualifier, so they remain invisible to THIS walker — correlation
+/// scoping needs a qualifier; the CLL-3 projection walker
+/// ([`collect_derived_refs`]) captures the unqualified case separately.
+/// Unknown variants are still not descended (silence, never
+/// misclassification). This walker is depth-unbounded by construction:
+/// it only ever appends already-validated qualified pairs and is used
+/// for bounded predicate trees; the CLL-3 projection walker applies the
+/// explicit depth cap.
 fn collect_qualified_refs(expr: &Expr, refs: &mut Vec<(String, String)>) {
+    if let Expr::CompoundIdentifier(_) = expr {
+        refs.extend(qualified_column(expr));
+        return;
+    }
+    // Bare `Identifier`s carry no qualifier — invisible to this walker by
+    // design (correlation needs a qualifier). Every other shape recurses
+    // over its child sub-expressions via the shared descent.
+    for child in expr_children(expr) {
+        collect_qualified_refs(child, refs);
+    }
+}
+
+/// The child sub-expressions to descend into for both ref walkers — the
+/// SINGLE place that knows the predicate/expression shapes cute-dbt models
+/// (AND/OR trees, comparisons, IS \[NOT\] NULL, BETWEEN, IN lists, LIKE,
+/// CAST, parens, unary NOT) plus, since CLL-3 (cute-dbt#449),
+/// `Function` args, `Case` branches, the special-syntax exprs sqlparser
+/// models as their own variants rather than `Expr::Function`
+/// (`Extract`/`Ceil`/`Floor`/`Convert`/`Collate`/`Substring`/`Trim`/
+/// `Position`/`Overlay`), and a scalar `Subquery`'s correlated `WHERE`.
+/// Sharing this between [`collect_qualified_refs`] and [`walk_derived_refs`]
+/// keeps the two walkers thin (one descent shape, not two) and fully
+/// exercised — EXCEPT the `Subquery` arm, which only the correlation walker
+/// reaches: [`walk_derived_refs`] short-circuits `Expr::Subquery` as a cap
+/// signal BEFORE calling this (a scalar subquery is not an intra-model
+/// input — descending it would fabricate provenance; see that walker).
+/// `Identifier` / `CompoundIdentifier` leaves
+/// have NO children — the callers handle them. Unknown variants yield no
+/// children: silence, never misclassification.
+fn expr_children(expr: &Expr) -> Vec<&Expr> {
     match expr {
-        Expr::CompoundIdentifier(_) => refs.extend(qualified_column(expr)),
-        Expr::BinaryOp { left, right, .. } => {
-            collect_qualified_refs(left, refs);
-            collect_qualified_refs(right, refs);
-        }
+        Expr::BinaryOp { left, right, .. } => vec![left, right],
         Expr::UnaryOp { expr: inner, .. }
         | Expr::Nested(inner)
         | Expr::IsNull(inner)
         | Expr::IsNotNull(inner)
-        | Expr::Cast { expr: inner, .. } => collect_qualified_refs(inner, refs),
+        | Expr::Cast { expr: inner, .. }
+        // Special-syntax single-operand exprs (cute-dbt#449,
+        // CodeRabbit/verifier): sqlparser models `extract(field FROM a.x)`,
+        // `ceil(a.x)`, `floor(a.x)`, `convert(a.x, …)`, and `a.x COLLATE c`
+        // as DISTINCT `Expr` variants rather than `Expr::Function`, so their
+        // operand refs were silently dropped. Descending them collects the
+        // operand (honest-direction — ADDS a correct `Derived` edge, never
+        // fabricates one). The non-`Expr` fields (datetime field, target
+        // type, collation name) carry no column refs.
+        | Expr::Extract { expr: inner, .. }
+        | Expr::Ceil { expr: inner, .. }
+        | Expr::Floor { expr: inner, .. }
+        | Expr::Convert { expr: inner, .. }
+        | Expr::Collate { expr: inner, .. } => vec![inner],
         Expr::Between {
             expr: inner,
             low,
             high,
             ..
-        } => {
-            collect_qualified_refs(inner, refs);
-            collect_qualified_refs(low, refs);
-            collect_qualified_refs(high, refs);
-        }
+        } => vec![inner, low, high],
         Expr::InList {
             expr: inner, list, ..
         } => {
-            collect_qualified_refs(inner, refs);
-            for item in list {
-                collect_qualified_refs(item, refs);
-            }
+            let mut out = vec![inner.as_ref()];
+            out.extend(list.iter());
+            out
         }
         Expr::Like {
             expr: inner,
@@ -1132,12 +1400,102 @@ fn collect_qualified_refs(expr: &Expr, refs: &mut Vec<(String, String)>) {
             expr: inner,
             pattern,
             ..
+        } => vec![inner, pattern],
+        // Multi-operand special-syntax exprs (cute-dbt#449,
+        // CodeRabbit/verifier): `substring(a.x FROM b.lo FOR b.len)`,
+        // `trim(b.ch FROM a.x)`, `position(a.x IN b.hay)`,
+        // `overlay(a.x PLACING b.p FROM b.f)`. Each is its OWN `Expr`
+        // variant (not `Expr::Function`), so every column operand was
+        // dropped. Collect ALL the `Expr`-typed operands (the `Option`
+        // ones only when present). Honest-direction: ADDS correct
+        // `Derived` edges, never fabricates one.
+        Expr::Substring {
+            expr: inner,
+            substring_from,
+            substring_for,
+            ..
         } => {
-            collect_qualified_refs(inner, refs);
-            collect_qualified_refs(pattern, refs);
+            let mut out = vec![inner.as_ref()];
+            out.extend(substring_from.as_deref());
+            out.extend(substring_for.as_deref());
+            out
         }
-        _ => {}
+        Expr::Trim {
+            expr: inner,
+            trim_what,
+            trim_characters,
+            ..
+        } => {
+            let mut out = vec![inner.as_ref()];
+            out.extend(trim_what.as_deref());
+            if let Some(chars) = trim_characters {
+                out.extend(chars.iter());
+            }
+            out
+        }
+        Expr::Position { expr: inner, r#in } => vec![inner, r#in],
+        Expr::Overlay {
+            expr: inner,
+            overlay_what,
+            overlay_from,
+            overlay_for,
+        } => {
+            let mut out = vec![inner.as_ref(), overlay_what.as_ref(), overlay_from.as_ref()];
+            out.extend(overlay_for.as_deref());
+            out
+        }
+        Expr::Function(func) => function_arg_exprs(func),
+        Expr::Case {
+            operand,
+            conditions,
+            else_result,
+            ..
+        } => {
+            let mut out: Vec<&Expr> = Vec::new();
+            out.extend(operand.as_deref());
+            for when in conditions {
+                out.push(&when.condition);
+                out.push(&when.result);
+            }
+            out.extend(else_result.as_deref());
+            out
+        }
+        Expr::Subquery(query) => subquery_where(query).into_iter().collect(),
+        _ => Vec::new(),
     }
+}
+
+/// The correlated `WHERE` of a scalar subquery, when its body is a plain
+/// `SELECT`. The inner relation's own columns are NOT this model's inputs —
+/// only the correlated outer refs the `WHERE` carries — so the projection is
+/// deliberately not descended (conservative). `None` for a set-operation /
+/// `WITH`-bearing / where-less subquery.
+fn subquery_where(query: &Query) -> Option<&Expr> {
+    let SetExpr::Select(select) = query.body.as_ref() else {
+        return None;
+    };
+    select.selection.as_ref()
+}
+
+/// The argument expressions of a function call — the `Expr` inside each
+/// positional / named arg. Wildcard args (`count(*)`, `f(t.*)`) carry no
+/// column expression and contribute nothing. Used by both the qualified-ref
+/// walker (correlation) and the CLL-3 projection walker.
+fn function_arg_exprs(func: &sqlparser::ast::Function) -> Vec<&Expr> {
+    let sqlparser::ast::FunctionArguments::List(list) = &func.args else {
+        return Vec::new();
+    };
+    list.args
+        .iter()
+        .filter_map(|arg| match arg {
+            sqlparser::ast::FunctionArg::Unnamed(fae)
+            | sqlparser::ast::FunctionArg::Named { arg: fae, .. }
+            | sqlparser::ast::FunctionArg::ExprNamed { arg: fae, .. } => match fae {
+                sqlparser::ast::FunctionArgExpr::Expr(e) => Some(e),
+                _ => None,
+            },
+        })
+        .collect()
 }
 
 /// The single projected column of a `NOT IN` inner subquery — lowercased,
@@ -2955,6 +3313,31 @@ mod tests {
             .collect()
     }
 
+    /// The intra-model source node id of an edge's `from_col`.
+    fn source_node(e: &ColumnEdge) -> String {
+        match &e.from_col.scope {
+            crate::domain::ColumnScope::Intra { node_id } => node_id.clone(),
+            crate::domain::ColumnScope::Cross { .. } => unreachable!("intra-only in CLL-3"),
+        }
+    }
+
+    /// Parse a bare SQL expression for the qualified-ref walker tests.
+    fn parse_expr(sql: &str) -> Expr {
+        let mut stmts = Parser::parse_sql(&GenericDialect {}, &format!("SELECT {sql}"))
+            .unwrap_or_else(|e| panic!("`{sql}` should parse as an expr: {e:?}"));
+        let stmt = stmts.pop().expect("one statement");
+        let Statement::Query(query) = stmt else {
+            panic!("expected a query");
+        };
+        let SetExpr::Select(select) = query.body.as_ref() else {
+            panic!("expected a select");
+        };
+        match &select.projection[0] {
+            SelectItem::UnnamedExpr(e) | SelectItem::ExprWithAlias { expr: e, .. } => e.clone(),
+            other => panic!("expected an expr projection, got {other:?}"),
+        }
+    }
+
     #[test]
     fn column_lineage_pass_through_resolved() {
         // `c.email AS email` — output name == input column ⇒ PassThrough,
@@ -3156,29 +3539,675 @@ mod tests {
     }
 
     #[test]
-    fn column_lineage_derived_not_produced_honest_absence() {
-        // `coalesce(a.x, b.y) AS z` is an Expr::Function — CLL-2 emits NO
-        // Derived edge (that is CLL-3); honest absence, never a fabricated edge.
+    fn column_lineage_derived_function_resolved() {
+        // CLL-3 (cute-dbt#449): `coalesce(a.x, b.y) AS z` is an Expr::Function
+        // — the extended walker collects BOTH qualified args ⇒ two `Derived`
+        // edges, both `Resolved` (the SQL named the relation explicitly).
         let g = graph(
             "WITH a AS (SELECT 1 AS x), b AS (SELECT 2 AS y) \
              SELECT coalesce(a.x, b.y) AS z FROM a, b",
         );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "z");
+        assert_eq!(edges.len(), 2, "one Derived edge per collected input ref");
         assert!(
-            edges_to(&g, TERMINAL_NODE_NAME, "z").is_empty(),
-            "no Derived edge for an expression in CLL-2"
+            edges.iter().all(|e| e.kind == ColumnEdgeKind::Derived),
+            "an expression input is a Derived edge"
         );
         assert!(
-            g.column_edges()
+            edges
                 .iter()
-                .all(|e| e.kind != ColumnEdgeKind::Derived),
-            "no Derived edge is ever produced by CLL-2"
+                .all(|e| e.confidence == ColumnEdgeConfidence::Resolved),
+            "both args are qualified ⇒ Resolved"
         );
-        // But the column span IS recorded so column→code sync can flash it.
+        let from: std::collections::BTreeSet<_> = edges
+            .iter()
+            .map(|&e| (source_node(e), e.from_col.column.clone()))
+            .collect();
+        assert_eq!(
+            from,
+            [
+                ("a".to_owned(), "x".to_owned()),
+                ("b".to_owned(), "y".to_owned())
+            ]
+            .into_iter()
+            .collect(),
+            "fans out to BOTH expression inputs, never a silent drop"
+        );
+        // The derived column also carries a span for the sync layer.
         assert!(
             g.column_spans()
                 .iter()
                 .any(|cs| cs.node_id == TERMINAL_NODE_NAME && cs.column == "z"),
-            "the derived column still carries a span for the sync layer"
+            "the derived column still carries a span"
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_case_collects_each_branch() {
+        // A searched CASE — refs come from every WHEN condition, every THEN
+        // result, and the ELSE result (no operand here).
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x, 2 AS flag), b AS (SELECT 3 AS y) \
+             SELECT CASE WHEN a.flag > 0 THEN a.x ELSE b.y END AS z FROM a, b",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "z");
+        let from: std::collections::BTreeSet<_> = edges
+            .iter()
+            .map(|&e| (source_node(e), e.from_col.column.clone()))
+            .collect();
+        assert_eq!(
+            from,
+            [
+                ("a".to_owned(), "flag".to_owned()),
+                ("a".to_owned(), "x".to_owned()),
+                ("b".to_owned(), "y".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            "WHEN condition + THEN result + ELSE result all contribute refs"
+        );
+        assert!(
+            edges.iter().all(|e| e.kind == ColumnEdgeKind::Derived),
+            "a CASE projection is Derived"
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_simple_case_operand() {
+        // A simple CASE — the operand expression ALSO contributes a ref.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x, 2 AS k), b AS (SELECT 3 AS y) \
+             SELECT CASE a.k WHEN 1 THEN a.x ELSE b.y END AS z FROM a, b",
+        );
+        let from: std::collections::BTreeSet<_> = edges_to(&g, TERMINAL_NODE_NAME, "z")
+            .iter()
+            .map(|&e| (source_node(e), e.from_col.column.clone()))
+            .collect();
+        assert!(
+            from.contains(&("a".to_owned(), "k".to_owned())),
+            "the simple-CASE operand a.k is collected (not dropped): {from:?}"
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_bare_identifier_reached() {
+        // CLL-3: a bare unqualified Identifier inside an expression is now
+        // reached (CLL-2 ignored it). Single-source ⇒ Resolved.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x) \
+             SELECT upper(x) AS z FROM a",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "z");
+        assert_eq!(edges.len(), 1, "bare identifier collected, single-source");
+        assert_eq!(edges[0].from_col, ColumnRef::intra("a", "x"));
+        assert_eq!(edges[0].kind, ColumnEdgeKind::Derived);
+        assert_eq!(edges[0].confidence, ColumnEdgeConfidence::Resolved);
+    }
+
+    #[test]
+    fn column_lineage_derived_unqualified_multi_source_ambiguous() {
+        // A bare identifier under a multi-relation FROM ⇒ fan out to every
+        // candidate, all Ambiguous, never dropped, never a wrong Resolved.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS status), b AS (SELECT 2 AS other) \
+             SELECT lower(status) AS z FROM a, b",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "z");
+        assert_eq!(edges.len(), 2, "fanned out to both candidate sources");
+        assert!(
+            edges
+                .iter()
+                .all(|e| e.confidence == ColumnEdgeConfidence::Ambiguous),
+            "unqualified-under-multi-source ⇒ Ambiguous"
+        );
+        assert!(edges.iter().all(|e| e.kind == ColumnEdgeKind::Derived));
+        let sources: std::collections::BTreeSet<_> =
+            edges.iter().map(|&e| source_node(e)).collect();
+        assert_eq!(
+            sources,
+            ["a".to_owned(), "b".to_owned()].into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_cast_still_works() {
+        // CAST inside the expression still resolves its inner column.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x) \
+             SELECT cast(a.x AS varchar) || 'z' AS z FROM a",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "z");
+        assert_eq!(edges.len(), 1);
+        assert_eq!(edges[0].from_col, ColumnRef::intra("a", "x"));
+        assert_eq!(edges[0].kind, ColumnEdgeKind::Derived);
+    }
+
+    #[test]
+    fn column_lineage_derived_between_collects_all_three_operands() {
+        // A BETWEEN projection expression — the tested expr + low + high all
+        // contribute refs (pins the `expr_children` Between arm).
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x), b AS (SELECT 2 AS lo, 3 AS hi) \
+             SELECT (a.x BETWEEN b.lo AND b.hi) AS z FROM a, b",
+        );
+        let from: std::collections::BTreeSet<_> = edges_to(&g, TERMINAL_NODE_NAME, "z")
+            .iter()
+            .map(|&e| (source_node(e), e.from_col.column.clone()))
+            .collect();
+        assert_eq!(
+            from,
+            [
+                ("a".to_owned(), "x".to_owned()),
+                ("b".to_owned(), "lo".to_owned()),
+                ("b".to_owned(), "hi".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            "BETWEEN's expr + low + high operands all contribute Derived refs"
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_inlist_and_like_collect_refs() {
+        // IN-list + LIKE projection expressions — pin the `expr_children`
+        // InList and Like arms (the list items + the pattern operand).
+        let g_in = graph(
+            "WITH a AS (SELECT 1 AS x), b AS (SELECT 2 AS v) \
+             SELECT (a.x IN (b.v, 3)) AS z FROM a, b",
+        );
+        let in_from: std::collections::BTreeSet<_> = edges_to(&g_in, TERMINAL_NODE_NAME, "z")
+            .iter()
+            .map(|&e| (source_node(e), e.from_col.column.clone()))
+            .collect();
+        assert!(
+            in_from.contains(&("a".to_owned(), "x".to_owned()))
+                && in_from.contains(&("b".to_owned(), "v".to_owned())),
+            "IN-list collects the tested expr AND the list refs: {in_from:?}"
+        );
+
+        let g_like = graph(
+            "WITH a AS (SELECT 1 AS x), b AS (SELECT 'p' AS pat) \
+             SELECT (a.x LIKE b.pat) AS z FROM a, b",
+        );
+        let like_from: std::collections::BTreeSet<_> = edges_to(&g_like, TERMINAL_NODE_NAME, "z")
+            .iter()
+            .map(|&e| (source_node(e), e.from_col.column.clone()))
+            .collect();
+        assert!(
+            like_from.contains(&("a".to_owned(), "x".to_owned()))
+                && like_from.contains(&("b".to_owned(), "pat".to_owned())),
+            "LIKE collects the tested expr AND the pattern ref: {like_from:?}"
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_binaryop_two_inputs() {
+        // `a.x + b.y AS s` — a BinaryOp expression, two qualified inputs.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x), b AS (SELECT 2 AS y) \
+             SELECT a.x + b.y AS s FROM a, b",
+        );
+        let from: std::collections::BTreeSet<_> = edges_to(&g, TERMINAL_NODE_NAME, "s")
+            .iter()
+            .map(|&e| (source_node(e), e.from_col.column.clone()))
+            .collect();
+        assert_eq!(
+            from,
+            [
+                ("a".to_owned(), "x".to_owned()),
+                ("b".to_owned(), "y".to_owned())
+            ]
+            .into_iter()
+            .collect()
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_pure_scalar_subquery_emits_no_fabricated_edge() {
+        // cute-dbt#449 (CodeRabbit/verifier) — the DECISIVE honesty fix. A
+        // projection that is JUST a scalar correlated subquery
+        // (`(SELECT … WHERE p.k = o.id) AS m`) has its value come from ANOTHER
+        // relation through the subquery — an honestly UNKNOWN intra-model
+        // source, NOT an input this model reads. The OLD code descended the
+        // subquery's WHERE and emitted a Resolved edge from the PREDICATE
+        // column (`a.id`/`b.aid`), never the value column (`b.amt`), against a
+        // relation that is not even an intra-model DAG node — a false claim on
+        // BOTH prongs (wrong column + phantom source). The cap fix makes a pure
+        // subquery a complexity signal (like EXISTS/IN): NO intra-model Derived
+        // edge at all (Opaque / honest absence). Cross-model trace is CLL-4.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS id), b AS (SELECT 2 AS aid, 3 AS amt) \
+             SELECT (SELECT max(b.amt) FROM b WHERE b.aid = a.id) AS m FROM a",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "m");
+        // No fabricated source: never the predicate col, never any inner col.
+        let from: std::collections::BTreeSet<_> = edges
+            .iter()
+            .map(|&e| (source_node(e), e.from_col.column.clone()))
+            .collect();
+        assert!(
+            !from.contains(&("a".to_owned(), "id".to_owned())),
+            "the predicate col a.id must NOT be fabricated as a value source: {from:?}"
+        );
+        assert!(
+            from.iter().all(|(node, _)| node != "b"),
+            "no inner-relation (b.*) col is fabricated as an intra-model source: {from:?}"
+        );
+        // A pure-subquery projection yields no intra-model Derived edge at all
+        // (its source is honestly unknown — never a fabricated Resolved).
+        assert!(
+            edges.is_empty(),
+            "a pure scalar-subquery projection has no fabricated intra-model edge: {:?}",
+            edges
+                .iter()
+                .map(|e| (source_node(e), e.from_col.column.clone(), e.confidence))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_subquery_verifier_repro_last_paid() {
+        // The verifier's EXACT first repro. `last_paid` is a pure scalar
+        // subquery over `raw_pay p` (not an intra-model DAG node). NO edge with
+        // a `p.*` source (neither the predicate `p.order_id` nor the value
+        // `p.paid_at`), and NO Resolved edge for `last_paid` from a non-DAG
+        // node — its intra-model source is honestly unknown.
+        let g = graph(
+            "WITH orders AS (SELECT id, amount FROM raw_orders) \
+             SELECT o.id AS id, \
+                    (SELECT max(p.paid_at) FROM raw_pay p WHERE p.order_id = o.id) AS last_paid \
+             FROM orders o",
+        );
+        let last_paid = edges_to(&g, TERMINAL_NODE_NAME, "last_paid");
+        assert!(
+            last_paid
+                .iter()
+                .all(|e| source_node(e) != "p" && source_node(e) != "raw_pay"),
+            "no p.*/raw_pay source is fabricated for last_paid: {:?}",
+            last_paid
+                .iter()
+                .map(|&e| (source_node(e), e.from_col.column.clone()))
+                .collect::<Vec<_>>()
+        );
+        assert!(
+            !last_paid
+                .iter()
+                .any(|e| e.confidence == ColumnEdgeConfidence::Resolved),
+            "last_paid carries no Resolved edge from a non-DAG node: {:?}",
+            last_paid.iter().map(|e| e.confidence).collect::<Vec<_>>()
+        );
+        // The direct sibling column `id` is unaffected (still resolves).
+        let id_edges = edges_to(&g, TERMINAL_NODE_NAME, "id");
+        assert!(
+            id_edges
+                .iter()
+                .any(|&e| source_node(e) == "orders" && e.from_col.column == "id"),
+            "the plain sibling column o.id still resolves through `orders`: {:?}",
+            id_edges
+                .iter()
+                .map(|&e| (source_node(e), e.from_col.column.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_subquery_verifier_repro_no_phantom_inner_refs() {
+        // The verifier's second repro: a scalar subquery whose WHERE references
+        // ONLY its own inner relation (`b.x = b.y`, no outer correlation). The
+        // OLD code would still descend and fabricate `b.x`/`b.y` edges; the cap
+        // emits none. (`m` is a pure subquery ⇒ no intra-model edge.)
+        let g = graph("SELECT (SELECT max(b.z) FROM t2 b WHERE b.x = b.y) AS m FROM t1 a");
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "m");
+        assert!(
+            edges
+                .iter()
+                .all(|e| source_node(e) != "b" && source_node(e) != "t2"),
+            "no fabricated b.x/b.y/b.z inner refs: {:?}",
+            edges
+                .iter()
+                .map(|&e| (source_node(e), e.from_col.column.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_mixed_subquery_degrades_visible_ref_to_ambiguous() {
+        // The mixed case: `coalesce(a.x, (SELECT …)) AS z` over a SOLE/known
+        // source. The top-level visible ref `a.x` IS collected, but the scalar
+        // subquery trips the cap, so `a.x` degrades to Ambiguous — never a
+        // Resolved fabrication, and NONE of the subquery's internals (`b.*`)
+        // are collected.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x, 2 AS k), b AS (SELECT 3 AS z, 4 AS k) \
+             SELECT coalesce(a.x, (SELECT max(b.z) FROM b WHERE b.k = a.k)) AS z FROM a",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "z");
+        // a.x is present (visible top-level ref, never dropped)…
+        assert!(
+            edges
+                .iter()
+                .any(|&e| source_node(e) == "a" && e.from_col.column == "x"),
+            "the visible top-level ref a.x is collected: {:?}",
+            edges
+                .iter()
+                .map(|&e| (source_node(e), e.from_col.column.clone()))
+                .collect::<Vec<_>>()
+        );
+        // …but degraded to Ambiguous by the subquery cap (never Resolved).
+        assert!(
+            edges
+                .iter()
+                .all(|e| e.confidence == ColumnEdgeConfidence::Ambiguous),
+            "the subquery cap degrades every edge to Ambiguous, never a \
+             fabricated Resolved: {:?}",
+            edges.iter().map(|e| e.confidence).collect::<Vec<_>>()
+        );
+        // No subquery internals (b.z / b.k) are ever collected.
+        assert!(
+            edges.iter().all(|e| source_node(e) != "b"),
+            "the subquery's inner refs (b.*) are never collected: {:?}",
+            edges
+                .iter()
+                .map(|&e| (source_node(e), e.from_col.column.clone()))
+                .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_special_syntax_exprs_collect_operand() {
+        // cute-dbt#449 (CodeRabbit/verifier) — the SECONDARY honest-direction
+        // fix. sqlparser models `substring`/`trim`/`extract`/`position` as
+        // DISTINCT `Expr` variants (not `Expr::Function`), so their operand
+        // refs were silently dropped (no edge). Now each descends, collecting
+        // its column operand as a `Derived` edge. Single-source ⇒ Resolved.
+        let cases = [
+            ("substring(a.x FROM 1 FOR 3)", "y"),
+            ("trim(a.x)", "y"),
+            ("extract(year FROM a.x)", "y"),
+            ("position('z' IN a.x)", "y"),
+            // OVERLAY parses to its OWN `Expr::Overlay` variant; the target
+            // operand a.x is collected (kills the `delete Expr::Overlay arm`
+            // mutant in `expr_children`).
+            ("overlay(a.x PLACING 'q' FROM 2)", "y"),
+        ];
+        for (proj, out_col) in cases {
+            let sql = format!("WITH a AS (SELECT 1 AS x) SELECT {proj} AS {out_col} FROM a");
+            let g = graph(&sql);
+            let edges = edges_to(&g, TERMINAL_NODE_NAME, out_col);
+            assert!(
+                edges
+                    .iter()
+                    .any(|&e| source_node(e) == "a" && e.from_col.column == "x"),
+                "`{proj}` must collect the operand a.x as a Derived edge: {:?}",
+                edges
+                    .iter()
+                    .map(|&e| (source_node(e), e.from_col.column.clone()))
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                edges.iter().all(|e| e.kind == ColumnEdgeKind::Derived),
+                "`{proj}` is a Derived projection"
+            );
+            assert!(
+                edges
+                    .iter()
+                    .all(|e| e.confidence == ColumnEdgeConfidence::Resolved),
+                "`{proj}`'s single-source operand is Resolved"
+            );
+        }
+    }
+
+    #[test]
+    fn column_lineage_complexity_cap_exists_degrades_to_ambiguous_never_panics() {
+        // The issue's canonical complexity trigger: `CASE WHEN EXISTS (…)`.
+        // An EXISTS subquery is a shape the walker deliberately does NOT model
+        // semantically — it trips the cap, so the whole column's visible refs
+        // degrade to Ambiguous. Never a panic, never a fabricated Resolved.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x), b AS (SELECT 2 AS bid) \
+             SELECT CASE WHEN EXISTS (SELECT 1 FROM b WHERE b.bid = a.x) \
+                    THEN a.x ELSE 0 END AS z FROM a, b",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "z");
+        // a.x is still VISIBLE (the THEN branch) so it is never dropped.
+        assert!(!edges.is_empty(), "the cap NEVER drops everything visible");
+        assert!(
+            edges.iter().all(|e| e.kind == ColumnEdgeKind::Derived),
+            "still Derived"
+        );
+        assert!(
+            edges
+                .iter()
+                .all(|e| e.confidence == ColumnEdgeConfidence::Ambiguous),
+            "an EXISTS-bearing expression degrades every edge to Ambiguous, \
+             never a fabricated Resolved: {:?}",
+            edges.iter().map(|e| e.confidence).collect::<Vec<_>>()
+        );
+        // The visible THEN ref is still present (honest absence floor).
+        assert!(
+            edges
+                .iter()
+                .any(|&e| source_node(e) == "a" && e.from_col.column == "x"),
+            "the visible THEN ref a.x is listed, never silently dropped"
+        );
+    }
+
+    #[test]
+    fn collect_derived_refs_depth_cap_triggers_without_panic() {
+        // Defense-in-depth: a synthetically deep AST (built directly, past the
+        // descent cap) trips `capped` and STOPS recursing — no stack overflow,
+        // no panic — while keeping whatever it saw above the cap. This guards
+        // the stack even if the parser's own recursion limit changes; in
+        // practice sqlparser fails-closed at its 50-deep parse limit first
+        // (see open_concerns), so this is the belt to that suspenders.
+        let mut expr = Expr::CompoundIdentifier(vec![
+            sqlparser::ast::Ident::new("a"),
+            sqlparser::ast::Ident::new("x"),
+        ]);
+        // Wrap DERIVED_DEPTH_CAP + 10 levels of Nested(...) around it.
+        for _ in 0..(DERIVED_DEPTH_CAP + 10) {
+            expr = Expr::Nested(Box::new(expr));
+        }
+        let collected = collect_derived_refs(&expr); // must not overflow/panic
+        assert!(
+            collected.capped,
+            "an AST past the depth cap sets the capped flag"
+        );
+        // Resolving it degrades to Ambiguous, never Resolved.
+        let mut aliases = HashMap::new();
+        aliases.insert("a".to_owned(), "a".to_owned());
+        let cols = derived_input_cols(collected, &aliases, None);
+        assert!(
+            cols.iter()
+                .all(|c| c.confidence == ColumnEdgeConfidence::Ambiguous),
+            "a capped collection degrades to Ambiguous, never a wrong Resolved"
+        );
+    }
+
+    #[test]
+    fn collect_derived_refs_ref_cap_degrades_wide_expression() {
+        // A pathologically WIDE but SHALLOW expression (one function, more
+        // args than DERIVED_REF_CAP) is a complexity signal that trips
+        // `capped` via the ref cap (not the depth cap). Built directly.
+        let args: Vec<sqlparser::ast::FunctionArg> = (0..(DERIVED_REF_CAP + 5))
+            .map(|i| {
+                sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
+                    Expr::CompoundIdentifier(vec![
+                        sqlparser::ast::Ident::new("a"),
+                        sqlparser::ast::Ident::new(format!("c{i}")),
+                    ]),
+                ))
+            })
+            .collect();
+        let expr = Expr::Function(sqlparser::ast::Function {
+            name: sqlparser::ast::ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+                sqlparser::ast::Ident::new("coalesce"),
+            )]),
+            uses_odbc_syntax: false,
+            parameters: sqlparser::ast::FunctionArguments::None,
+            args: sqlparser::ast::FunctionArguments::List(sqlparser::ast::FunctionArgumentList {
+                duplicate_treatment: None,
+                args,
+                clauses: Vec::new(),
+            }),
+            filter: None,
+            null_treatment: None,
+            over: None,
+            within_group: Vec::new(),
+        });
+        let collected = collect_derived_refs(&expr);
+        assert!(collected.capped, "more refs than the ref cap sets capped");
+    }
+
+    /// `a.x` wrapped in `n` levels of `Nested(...)` — a leaf at AST depth `n`.
+    fn nested_to_depth(n: u32) -> Expr {
+        let mut e = Expr::CompoundIdentifier(vec![
+            sqlparser::ast::Ident::new("a"),
+            sqlparser::ast::Ident::new("x"),
+        ]);
+        for _ in 0..n {
+            e = Expr::Nested(Box::new(e));
+        }
+        e
+    }
+
+    #[test]
+    fn collect_derived_refs_depth_cap_boundary_is_exact() {
+        // Boundary precision (kills off-by-one cap mutants `> -> >=` / `> -> ==`):
+        // a leaf reached at depth == DERIVED_DEPTH_CAP is the LAST level that is
+        // NOT capped (the check is `depth > DERIVED_DEPTH_CAP`). One level
+        // deeper IS capped. The walk increments depth by exactly one per level.
+        let at_cap = collect_derived_refs(&nested_to_depth(DERIVED_DEPTH_CAP));
+        assert!(
+            !at_cap.capped,
+            "a leaf at exactly the cap depth is NOT capped"
+        );
+        assert_eq!(at_cap.refs.len(), 1, "and its ref IS collected");
+
+        let past_cap = collect_derived_refs(&nested_to_depth(DERIVED_DEPTH_CAP + 1));
+        assert!(
+            past_cap.capped,
+            "one level past the cap depth IS capped (no leaf collected)"
+        );
+        assert!(
+            past_cap.refs.is_empty(),
+            "the buried leaf past the cap is not reached"
+        );
+    }
+
+    #[test]
+    fn collect_derived_refs_ref_cap_boundary_is_exact() {
+        // Boundary precision for the ref cap (`refs.len() > DERIVED_REF_CAP`,
+        // kills `> -> ==` at 647:52): collecting exactly DERIVED_REF_CAP + 1
+        // refs does NOT cap (the last leaf is reached when len == REF_CAP, which
+        // is not `> REF_CAP`); collecting one more DOES cap on the next entry.
+        // Built as a flat function arg list (shallow, so only the ref cap can
+        // fire, never the depth cap).
+        let make = |count: usize| {
+            let args: Vec<sqlparser::ast::FunctionArg> = (0..count)
+                .map(|i| {
+                    sqlparser::ast::FunctionArg::Unnamed(sqlparser::ast::FunctionArgExpr::Expr(
+                        Expr::CompoundIdentifier(vec![
+                            sqlparser::ast::Ident::new("a"),
+                            sqlparser::ast::Ident::new(format!("c{i}")),
+                        ]),
+                    ))
+                })
+                .collect();
+            Expr::Function(sqlparser::ast::Function {
+                name: sqlparser::ast::ObjectName(vec![sqlparser::ast::ObjectNamePart::Identifier(
+                    sqlparser::ast::Ident::new("coalesce"),
+                )]),
+                uses_odbc_syntax: false,
+                parameters: sqlparser::ast::FunctionArguments::None,
+                args: sqlparser::ast::FunctionArguments::List(
+                    sqlparser::ast::FunctionArgumentList {
+                        duplicate_treatment: None,
+                        args,
+                        clauses: Vec::new(),
+                    },
+                ),
+                filter: None,
+                null_treatment: None,
+                over: None,
+                within_group: Vec::new(),
+            })
+        };
+        // Exactly REF_CAP + 1 leaves: the last leaf is entered with
+        // len == REF_CAP, which is NOT `> REF_CAP`, so it is collected and the
+        // walk never trips `capped`.
+        let at_cap = collect_derived_refs(&make(DERIVED_REF_CAP + 1));
+        assert!(
+            !at_cap.capped,
+            "exactly REF_CAP + 1 refs does not trip the ref cap"
+        );
+        assert_eq!(at_cap.refs.len(), DERIVED_REF_CAP + 1);
+        // One more leaf: the (REF_CAP + 2)-th entry sees len == REF_CAP + 1,
+        // which IS `> REF_CAP`, so it caps.
+        let past_cap = collect_derived_refs(&make(DERIVED_REF_CAP + 2));
+        assert!(past_cap.capped, "REF_CAP + 2 refs trips the ref cap");
+    }
+
+    #[test]
+    fn collect_qualified_refs_descends_into_function_args() {
+        // The shared correlation walker now descends Function/Case/Subquery —
+        // a qualified ref hidden inside a function is FOUND (strictly more
+        // correlation evidence, never less). Bare identifiers stay invisible
+        // to this walker (they carry no qualifier — correlation needs one).
+        let expr = parse_expr("coalesce(o.id, lower(c.name))");
+        let mut refs = Vec::new();
+        collect_qualified_refs(&expr, &mut refs);
+        let got: std::collections::BTreeSet<_> = refs.into_iter().collect();
+        assert_eq!(
+            got,
+            [
+                ("o".to_owned(), "id".to_owned()),
+                ("c".to_owned(), "name".to_owned())
+            ]
+            .into_iter()
+            .collect(),
+            "qualified refs nested inside functions are now collected"
+        );
+    }
+
+    #[test]
+    fn collect_qualified_refs_descends_into_case_and_subquery() {
+        let expr = parse_expr(
+            "CASE WHEN o.flag THEN o.a ELSE (SELECT max(r.b) FROM r WHERE r.k = o.k) END",
+        );
+        let mut refs = Vec::new();
+        collect_qualified_refs(&expr, &mut refs);
+        let got: std::collections::BTreeSet<_> = refs.into_iter().collect();
+        assert!(
+            got.contains(&("o".to_owned(), "flag".to_owned()))
+                && got.contains(&("o".to_owned(), "a".to_owned()))
+                && got.contains(&("o".to_owned(), "k".to_owned())),
+            "CASE branches + subquery correlation refs are collected: {got:?}"
+        );
+    }
+
+    #[test]
+    fn column_lineage_derived_same_source_keeps_weaker_confidence() {
+        // Honesty floor through `merge_max` (kills the `> -> ==` mutant at
+        // the rank comparison): when the SAME `(source, column)` is reached
+        // once qualified (Resolved) AND once via an unqualified multi-source
+        // fan-out (Ambiguous), the edge MUST end Ambiguous — never silently
+        // upgraded back to a false Resolved. `coalesce(a.x, x)` over a
+        // multi-relation FROM reaches `(a, x)` both ways.
+        let g = graph(
+            "WITH a AS (SELECT 1 AS x), b AS (SELECT 2 AS y) \
+             SELECT coalesce(a.x, x) AS z FROM a, b",
+        );
+        let edges = edges_to(&g, TERMINAL_NODE_NAME, "z");
+        let a_x: Vec<_> = edges
+            .iter()
+            .filter(|e| source_node(e) == "a" && e.from_col.column == "x")
+            .collect();
+        assert_eq!(a_x.len(), 1, "(a, x) is merged to a single edge");
+        assert_eq!(
+            a_x[0].confidence,
+            ColumnEdgeConfidence::Ambiguous,
+            "the weaker Ambiguous claim wins — never upgraded to a false Resolved"
         );
     }
 
