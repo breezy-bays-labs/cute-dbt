@@ -855,31 +855,51 @@ impl CteGraph {
         &self,
         terminal_node_id: &str,
     ) -> crate::domain::column_lineage::ModelOutputs {
+        let output_columns = self.terminal_output_columns(terminal_node_id);
+        let leaf_refs = self.model_leaf_refs(terminal_node_id);
+        let leaf_reading_nodes = self.leaf_reading_nodes(terminal_node_id);
+        let source_passthrough_columns = self.source_passthrough_terminal_columns(
+            terminal_node_id,
+            output_columns.as_deref().unwrap_or(&[]),
+            &leaf_reading_nodes,
+        );
+        crate::domain::column_lineage::ModelOutputs::with_passthrough(
+            output_columns,
+            leaf_refs,
+            source_passthrough_columns,
+        )
+    }
+
+    /// The model's terminal OUTPUT columns (lowercased, first-seen order),
+    /// or `None` when the terminal projection is non-enumerable — an Opaque
+    /// `*` edge lands on the terminal, or the terminal produced no resolvable
+    /// edge at all (we could not name a single output column).
+    fn terminal_output_columns(&self, terminal_node_id: &str) -> Option<Vec<String>> {
         let is_terminal = |scope: &ColumnScope| matches!(scope, ColumnScope::Intra { node_id } if node_id == terminal_node_id);
-        // Non-enumerable iff an Opaque `*` edge lands on the terminal node.
         let opaque_terminal = self.column_edges.iter().any(|e| {
             is_terminal(&e.to_col.scope)
                 && e.from_col.column == "*"
                 && e.confidence == ColumnEdgeConfidence::Opaque
         });
-        let output_columns = if opaque_terminal {
-            None
-        } else {
-            let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-            let mut cols: Vec<String> = Vec::new();
-            for edge in &self.column_edges {
-                if is_terminal(&edge.to_col.scope) && seen.insert(edge.to_col.column.clone()) {
-                    cols.push(edge.to_col.column.clone());
-                }
+        if opaque_terminal {
+            return None;
+        }
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut cols: Vec<String> = Vec::new();
+        for edge in &self.column_edges {
+            if is_terminal(&edge.to_col.scope) && seen.insert(edge.to_col.column.clone()) {
+                cols.push(edge.to_col.column.clone());
             }
-            // A terminal that produced no resolvable edges at all is honestly
-            // non-enumerable (we could not name a single output column).
-            if cols.is_empty() { None } else { Some(cols) }
-        };
-        // Every bare leaf the model reads across all bodies — the candidate
-        // `ref()`/`source()` boundaries. The cross-model builder constrains
-        // these to the model's REAL `depends_on` producers, so an intra-model
-        // CTE alias appearing here can never mis-stitch.
+        }
+        if cols.is_empty() { None } else { Some(cols) }
+    }
+
+    /// Every bare leaf the model reads across all bodies — the candidate
+    /// `ref()`/`source()` boundaries. The cross-model builder constrains these
+    /// to the model's REAL `depends_on` producers, so an intra-model CTE alias
+    /// appearing here can never mis-stitch. A WITH-less model (no CTE nodes)
+    /// recovers its leaf from the star edges' `from_col` scope node id.
+    fn model_leaf_refs(&self, terminal_node_id: &str) -> Vec<String> {
         let mut leaf_seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         let mut leaf_refs: Vec<String> = Vec::new();
         for node in &self.nodes {
@@ -889,11 +909,6 @@ impl CteGraph {
                 }
             }
         }
-        // A WITH-less model (e.g. `select * from "db"."s"."upstream"`) has NO
-        // CTE nodes, so `body_leaf_table_refs` are absent — but the Opaque /
-        // expanded star edges still carry the source leaf as the `from_col`
-        // scope node id. Recover those leaves so a flat downstream model still
-        // stitches across the `ref()` boundary.
         for edge in &self.column_edges {
             if let ColumnScope::Intra { node_id } = &edge.from_col.scope
                 && node_id != terminal_node_id
@@ -902,7 +917,143 @@ impl CteGraph {
                 leaf_refs.push(node_id.clone());
             }
         }
-        crate::domain::column_lineage::ModelOutputs::new(output_columns, leaf_refs)
+        leaf_refs
+    }
+
+    /// The CTE/terminal node IDS whose body reads an EXTERNAL leaf relation (a
+    /// `ref()`/`source()` boundary — NOT another CTE in this same model). A
+    /// column reaching one of these flowed in from OUTSIDE the model.
+    ///
+    /// `body_leaf_table_refs` includes intra-CTE references (the import CTE
+    /// `renamed` "reads" the CTE `source`), so we EXCLUDE refs that name a
+    /// sibling CTE — only a truly external relation marks a leaf boundary.
+    /// (The import CTE `source` reads `organizations`, an external relation →
+    /// leaf-reading; `final` reads `renamed`, a sibling CTE → NOT leaf-reading,
+    /// so a column computed in `final` like `_loaded_at` never falsely reaches
+    /// a source.)
+    fn leaf_reading_nodes(&self, terminal_node_id: &str) -> std::collections::BTreeSet<String> {
+        let cte_names: std::collections::BTreeSet<String> = self
+            .nodes
+            .iter()
+            .map(|n| n.name().to_ascii_lowercase())
+            .filter(|n| n != terminal_node_id)
+            .collect();
+        let mut leaf_reading_nodes: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
+        for node in &self.nodes {
+            let reads_external = node
+                .body_leaf_table_refs()
+                .iter()
+                .any(|leaf| !cte_names.contains(leaf));
+            if reads_external {
+                leaf_reading_nodes.insert(node.name().to_ascii_lowercase());
+            }
+        }
+        // WITH-less / star-only: the from-side leaf nodes of star edges are
+        // leaf-reading boundaries when they name an external relation.
+        for edge in &self.column_edges {
+            if let ColumnScope::Intra { node_id } = &edge.from_col.scope
+                && node_id != terminal_node_id
+                && !cte_names.contains(node_id)
+            {
+                leaf_reading_nodes.insert(node_id.clone());
+            }
+        }
+        leaf_reading_nodes
+    }
+
+    /// The terminal output columns whose intra provenance is a pure
+    /// pass-through/rename chain to a leaf-reading boundary (cute-dbt#450).
+    ///
+    /// `leaf_nodes` is the set of node ids that read a leaf relation (the
+    /// `ref()`/`source()` boundary — a column reaching one of these flows in
+    /// from OUTSIDE the model, so it is a genuine source-origin candidate). A
+    /// column whose chain instead dead-ends at a computed expression (a
+    /// `Derived` edge, or a node with no inbound edge that is NOT a leaf) is
+    /// EXCLUDED — never a fabricated source attribution.
+    fn source_passthrough_terminal_columns(
+        &self,
+        terminal_node_id: &str,
+        output_columns: &[String],
+        leaf_nodes: &std::collections::BTreeSet<String>,
+    ) -> std::collections::BTreeSet<String> {
+        let mut reaches_leaf_memo: std::collections::HashMap<(String, String), bool> =
+            std::collections::HashMap::new();
+        output_columns
+            .iter()
+            .filter(|col| {
+                self.column_reaches_leaf(
+                    terminal_node_id,
+                    col,
+                    leaf_nodes,
+                    &mut reaches_leaf_memo,
+                    0,
+                )
+            })
+            .cloned()
+            .collect()
+    }
+
+    /// `true` when the column `(node_id, column)` flows UNCHANGED (pass-through
+    /// / rename only) to a leaf-reading boundary. Memoized; depth-capped (the
+    /// chain is the per-model CTE depth — finite — but the cap guards a
+    /// pathological / cyclic AST). A `Derived` inbound edge or a non-leaf node
+    /// with no pass-through inbound breaks the chain (returns `false`).
+    fn column_reaches_leaf(
+        &self,
+        node_id: &str,
+        column: &str,
+        leaf_nodes: &std::collections::BTreeSet<String>,
+        memo: &mut std::collections::HashMap<(String, String), bool>,
+        depth: u32,
+    ) -> bool {
+        // A column whose owning node is itself a leaf-reading boundary came
+        // from outside the model — a genuine source-origin candidate.
+        if leaf_nodes.contains(node_id) {
+            return true;
+        }
+        if depth > 256 {
+            return false; // pathological chain — degrade (never a false claim).
+        }
+        let key = (node_id.to_owned(), column.to_owned());
+        if let Some(&hit) = memo.get(&key) {
+            return hit;
+        }
+        // Pre-seed `false` to break cycles (a column transitively feeding
+        // itself is not a clean pass-through).
+        memo.insert(key.clone(), false);
+        let mut reaches = false;
+        for edge in &self.column_edges {
+            let ColumnScope::Intra { node_id: to_node } = &edge.to_col.scope else {
+                continue;
+            };
+            if to_node != node_id || edge.to_col.column != column {
+                continue;
+            }
+            // Only a pass-through / rename preserves the column unchanged. A
+            // `Derived` / `Source`(Opaque `*`) / `JoinKey` edge breaks it.
+            if !matches!(
+                edge.kind,
+                ColumnEdgeKind::PassThrough | ColumnEdgeKind::Renamed
+            ) {
+                continue;
+            }
+            let ColumnScope::Intra { node_id: from_node } = &edge.from_col.scope else {
+                continue;
+            };
+            if self.column_reaches_leaf(
+                from_node,
+                &edge.from_col.column,
+                leaf_nodes,
+                memo,
+                depth + 1,
+            ) {
+                reaches = true;
+                break;
+            }
+        }
+        memo.insert(key, reaches);
+        reaches
     }
 }
 

@@ -247,6 +247,76 @@ fn renamed_column_trace_follows_the_rename() {
     );
 }
 
+// ---- never-a-false-claim: a COMPUTED column is NOT a source field --------
+
+#[test]
+fn computed_column_is_never_attributed_to_a_source() {
+    // A staging model `select *`-ing a source AND injecting a computed column
+    // (`current_timestamp as _loaded_at`, a surrogate `row_number()` key) —
+    // the computed columns must NOT be attributed to the source (they do not
+    // ORIGINATE there; claiming so is a fabricated lineage). Only the
+    // pass-through columns trace to the source.
+    let stg = "\
+with source as (
+    select * from \"db\".\"raw\".\"raw_orders\"
+),
+renamed as (
+    select id as order_id, amount as order_amount from source
+),
+final as (
+    select
+        row_number() over (order by order_id) as order_key
+        , order_id
+        , order_amount
+        , current_timestamp as _loaded_at
+    from renamed
+)
+select * from final";
+    let manifest = manifest_of(
+        vec![model(
+            "model.p.stg_orders",
+            "\"db\".\"staging\".\"stg_orders\"",
+            stg,
+            &["source.p.raw.raw_orders"],
+        )],
+        vec![source(
+            "source.p.raw.raw_orders",
+            "raw",
+            "db",
+            "\"db\".\"raw\".\"raw_orders\"",
+        )],
+    );
+    let graph = project_graph(&manifest);
+    let to_source: std::collections::BTreeSet<&str> = graph
+        .edges()
+        .iter()
+        .filter(|e| e.upstream == nid("source.p.raw.raw_orders"))
+        .map(|e| e.downstream_column.as_str())
+        .collect();
+    // The pass-through columns reach the source.
+    assert!(
+        to_source.contains("order_id"),
+        "a pass-through column traces to the source"
+    );
+    assert!(to_source.contains("order_amount"));
+    // The COMPUTED columns must NOT — never a fabricated source field.
+    assert!(
+        !to_source.contains("_loaded_at"),
+        "current_timestamp as _loaded_at is computed in-model — NOT a source field"
+    );
+    assert!(
+        !to_source.contains("order_key"),
+        "a surrogate row_number() key is computed in-model — NOT a source field"
+    );
+    // And the computed column's trace terminates honestly (NOT Source).
+    let trace = graph.trace_to_source(&manifest, &nid("model.p.stg_orders"), "_loaded_at");
+    assert_ne!(
+        trace.termination,
+        TraceTermination::Source,
+        "a computed column never claims a source origin"
+    );
+}
+
 // ---- B: blast-radius (TDD 3) --------------------------------------------
 
 #[test]
