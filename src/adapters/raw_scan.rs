@@ -535,25 +535,25 @@ mod tests {
     fn blank_is_total_on_malformed_spans() {
         // The masker must never panic on a malformed span — it fails closed.
         // Valid range blanks exactly that range.
-        let mut a = b"abcdef".to_vec();
-        blank(&mut a, 2, 4);
-        assert_eq!(&a, b"ab  ef");
+        let mut valid = b"abcdef".to_vec();
+        blank(&mut valid, 2, 4);
+        assert_eq!(&valid, b"ab  ef");
         // `to` past the end clamps to len (blanks the tail), never out-of-bounds.
-        let mut b = b"abcdef".to_vec();
-        blank(&mut b, 2, 999);
-        assert_eq!(&b, b"ab    ");
+        let mut clamped = b"abcdef".to_vec();
+        blank(&mut clamped, 2, 999);
+        assert_eq!(&clamped, b"ab    ");
         // Empty range (from == to) is a no-op.
-        let mut c = b"abcdef".to_vec();
-        blank(&mut c, 3, 3);
-        assert_eq!(&c, b"abcdef");
+        let mut empty = b"abcdef".to_vec();
+        blank(&mut empty, 3, 3);
+        assert_eq!(&empty, b"abcdef");
         // Inverted range (from > to) is a no-op, NOT a panic.
-        let mut d = b"abcdef".to_vec();
-        blank(&mut d, 4, 2);
-        assert_eq!(&d, b"abcdef");
+        let mut inverted = b"abcdef".to_vec();
+        blank(&mut inverted, 4, 2);
+        assert_eq!(&inverted, b"abcdef");
         // `from` past the end is a no-op, NOT a panic.
-        let mut e = b"abcdef".to_vec();
-        blank(&mut e, 10, 999);
-        assert_eq!(&e, b"abcdef");
+        let mut past_end = b"abcdef".to_vec();
+        blank(&mut past_end, 10, 999);
+        assert_eq!(&past_end, b"abcdef");
     }
 
     fn cte_entry(node_id: &str) -> SourceMapEntry {
