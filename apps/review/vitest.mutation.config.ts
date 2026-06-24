@@ -13,6 +13,7 @@ export default defineConfig({
       "src/domain/data/raw-spans.fuzz.test.ts",
       "src/domain/data/honesty.property.test.ts",
       "src/domain/data/dataset.test.ts",
+      "src/domain/cursor-sync.test.ts",
     ],
     environment: "node",
   },

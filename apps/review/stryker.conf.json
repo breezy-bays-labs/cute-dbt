@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
-  "_comment": "Stryker mutation testing — TARGETED at the strict honesty-fold set (council §E). Mutates ONLY the never-a-false-claim folds: the cell key.t trichotomy (cell-diff.ts), the confidence folds + cross-model cone (col-lineage.ts), and the byte-span reshaper (raw-spans.ts). NOT whole-suite (mirrors the Rust targeted cargo-mutants posture). Gate: >=90% kill overall, 100% on the cell trichotomy (cell-diff.ts).",
+  "_comment": "Stryker mutation testing — TARGETED at the strict honesty-fold set (council §E). Mutates ONLY the never-a-false-claim folds: the cell key.t trichotomy (cell-diff.ts), the confidence folds + cross-model cone (col-lineage.ts), the byte-span reshaper (raw-spans.ts), and the cursor⇄node sync resolution + anti-loop reducers (cursor-sync.ts — S6a, cute-dbt#496: innermost-span-wins + functional-setState bail + scroll-nonce + zone↔node mutual exclusion). NOT whole-suite (mirrors the Rust targeted cargo-mutants posture). Gate: >=90% kill overall, 100% on the cell trichotomy (cell-diff.ts).",
   "packageManager": "npm",
   "testRunner": "vitest",
   "plugins": ["@stryker-mutator/vitest-runner"],
@@ -9,7 +9,8 @@
   "mutate": [
     "src/domain/data/cell-diff.ts",
     "src/domain/data/col-lineage.ts",
-    "src/domain/data/raw-spans.ts"
+    "src/domain/data/raw-spans.ts",
+    "src/domain/cursor-sync.ts"
   ],
   "reporters": ["clear-text", "json"],
   "jsonReporter": { "fileName": "reports/mutation/mutation.json" },
