@@ -74,6 +74,13 @@ describe("PrTimeline", () => {
     const html = renderToStaticMarkup(<PrTimeline timeline={buildCommentTimeline(real)} feed={prTimelineFeed(real)} />);
     expect(html).toContain('data-testid="timeline-group-unanchored"');
   });
+  it("the conversation header labels comment count and thread count truthfully (14 vs 11)", () => {
+    // honesty: the noun must match the number. `total` is the comment count (14),
+    // `threadTotal` the thread count (11) — never the same number labeled twice.
+    const html = renderToStaticMarkup(<PrTimeline timeline={buildCommentTimeline(real)} feed={prTimelineFeed(real)} />);
+    expect(html).toContain("14 comments");
+    expect(html).toContain("11 threads");
+  });
   it("renders the HONEST feed panel — not present, with the spine-gap note (no fabricated commit/check)", () => {
     const html = renderToStaticMarkup(<PrTimeline timeline={buildCommentTimeline(real)} feed={prTimelineFeed(real)} />);
     expect(html).toContain('data-testid="pr-timeline-feed"');

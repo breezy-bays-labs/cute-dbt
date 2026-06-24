@@ -88,6 +88,10 @@ test("PR page: overview/files/timeline render REAL context, feed honest-empty, z
   // the REAL comment threads render with real authors + bodies (never invented).
   await expect(timeline.getByTestId("timeline-thread").first()).toBeVisible();
   await expect(timeline).toContainText("dogfood-dev");
+  // the conversation header labels the COMMENT count and THREAD count truthfully —
+  // distinct numbers, distinct nouns (never a thread count relabeled "comments").
+  await expect(timeline.getByTestId("timeline-total")).toContainText("14 comments");
+  await expect(timeline.getByTestId("timeline-total")).toContainText("11 threads");
   // a resolved thread carries the honest resolved badge (the dogfood has one).
   await expect(timeline.getByTestId("thread-resolved").first()).toBeVisible();
   // the unanchored (file-level / project) group is present + honestly labeled.

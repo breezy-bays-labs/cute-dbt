@@ -2,7 +2,10 @@
 // files / timeline folds + the honesty invariants:
 //   - counts are derived from the pr_dag state taxonomy, context nodes excluded;
 //   - removed_models surface as non-navigable removed rows (no false "open");
-//   - comment threads group + order honestly (line-less sorts last, never faked);
+//   - comment threads group + order honestly (line-less sorts FIRST to mirror the
+//     spine's `None`-before-`Some` within-bucket order, never faked);
+//   - `total` is the COMMENT count (derived), `threadTotal` the THREAD count — the
+//     spine's `pr_comments.total` (a thread count) is never relabeled "comments";
 //   - the temporal feed is HONESTLY ABSENT (the T2 spine gap) — `present:false`,
 //     never a fabricated commit/review/check.
 import { describe, it, expect } from "vitest";
@@ -147,14 +150,27 @@ describe("buildPrFiles", () => {
   });
 });
 
-describe("orderThreads (honest ordering)", () => {
-  it("orders by anchored line; a line-less (outdated) thread sorts LAST", () => {
+describe("orderThreads (spine-mirroring order)", () => {
+  it("a line-less (outdated) thread sorts FIRST, then anchored by line ascending", () => {
+    // mirrors the spine's `None`-before-`Some` within-bucket sort
+    // (src/domain/pr_comment_render.rs:343-348) so the PR page agrees with every
+    // other surface that consumes the spine's thread order.
     const threads: TimelineThread[] = [
       { line: 30, resolved: false, outdated: false, commentCount: 1, comments: [] },
       { line: null, resolved: false, outdated: true, commentCount: 1, comments: [] },
       { line: 10, resolved: false, outdated: false, commentCount: 1, comments: [] },
     ];
-    expect(orderThreads(threads).map((t) => t.line)).toEqual([10, 30, null]);
+    expect(orderThreads(threads).map((t) => t.line)).toEqual([null, 10, 30]);
+  });
+  it("multiple line-less threads keep insertion order (stable, lead the list)", () => {
+    const threads: TimelineThread[] = [
+      { line: null, resolved: false, outdated: true, commentCount: 1, comments: [{ author: "x", body: "first" }] },
+      { line: 7, resolved: false, outdated: false, commentCount: 1, comments: [] },
+      { line: null, resolved: false, outdated: true, commentCount: 1, comments: [{ author: "y", body: "second" }] },
+    ];
+    const out = orderThreads(threads);
+    expect(out.map((t) => t.line)).toEqual([null, null, 7]);
+    expect(out.slice(0, 2).map((t) => t.comments[0]!.author)).toEqual(["x", "y"]);
   });
   it("is stable for equal lines (insertion order preserved)", () => {
     const threads: TimelineThread[] = [
@@ -169,7 +185,13 @@ describe("buildCommentTimeline", () => {
   it("groups per-model threads + an unanchored group, with real counts", () => {
     const tl = buildCommentTimeline(real);
     expect(tl.hasComments).toBe(true);
-    expect(tl.total).toBe(11); // pr_comments.total (real)
+    // `total` is the COMMENT count (14 in the 440 dogfood — the sum of every
+    // thread's comments), NOT the spine's `pr_comments.total` (11, a THREAD
+    // count). `threadTotal` carries the thread count. Distinct numbers, distinct
+    // nouns — never the same number labeled two ways.
+    expect(tl.total).toBe(14);
+    expect(tl.threadTotal).toBe(11);
+    expect(tl.total).not.toBe(tl.threadTotal);
     // the unanchored group is present (the dogfood has 4 unanchored threads).
     const unanchored = tl.groups.find((g) => g.model === null);
     expect(unanchored).toBeDefined();
@@ -178,11 +200,16 @@ describe("buildCommentTimeline", () => {
     const cwno = tl.groups.find((g) => g.model === "customers_with_no_orders");
     expect(cwno?.resolvedCount).toBe(1);
   });
-  it("threads within a group are ordered by line", () => {
+  it("threads within a group follow the spine order: line-less first, then by line", () => {
     const tl = buildCommentTimeline(real);
     const om = tl.groups.find((g) => g.model === "order_metrics");
     const lines = om!.threads.map((t) => t.line);
-    expect(lines).toEqual([...lines].sort((a, b) => (a ?? Infinity) - (b ?? Infinity)));
+    // spine-mirroring order: nulls lead, then anchored lines ascending.
+    const expected = [
+      ...lines.filter((l) => l == null),
+      ...lines.filter((l): l is number => l != null).sort((a, b) => a - b),
+    ];
+    expect(lines).toEqual(expected);
   });
   it("carries each comment's author + body verbatim (never invented)", () => {
     const tl = buildCommentTimeline(real);

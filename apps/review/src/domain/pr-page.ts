@@ -257,14 +257,19 @@ export interface TimelineGroup {
 }
 
 /** The comment-timeline aggregation: per-model groups (in the spine's bucket order)
- *  + an unanchored group, threads ordered honestly by anchored line (a null/absent
- *  line — an outdated thread — sorts last, never fabricated to a fake line). */
+ *  + an unanchored group, threads ordered honestly (a line-less/outdated thread
+ *  sorts FIRST to match the spine's canonical within-bucket order — see
+ *  `orderThreads`; never fabricated to a fake line). */
 export interface CommentTimeline {
   groups: TimelineGroup[];
-  /** the spine's reported total comment count (pr_comments.total), or the derived
-   *  sum when the spine omits it. */
+  /** the total COMMENT count — always derived as the sum of every thread's
+   *  `commentCount` across all groups. NOT the spine's `pr_comments.total`, which
+   *  is a THREAD count (`src/domain/pr_comment_render.rs:167`) — passing it through
+   *  under a "comments" label would mislabel a thread count as a comment count. The
+   *  thread count lives in `threadTotal`. */
   total: number;
-  /** the count of grouped threads across all groups. */
+  /** the count of grouped threads across all groups (= the spine's
+   *  `pr_comments.total`, recomputed locally from the rendered groups). */
   threadTotal: number;
   /** does the context carry any comments at all (else honest-empty)? */
   hasComments: boolean;
@@ -284,15 +289,24 @@ function toTimelineThread(t: RenderedThread): TimelineThread {
   };
 }
 
-/** Order threads honestly: by anchored line ascending; a line-less (outdated)
- *  thread sorts AFTER all anchored ones (never invented a line). Stable for ties. */
+/** Order threads to match the spine's canonical within-bucket order
+ *  (`src/domain/pr_comment_render.rs:343-348`): a line-less (outdated) thread —
+ *  one with no live line — sorts FIRST (`None` before `Some`), then anchored
+ *  threads by line ascending. This deliberately mirrors the Rust spine so the PR
+ *  page agrees with every other surface that consumes the spine's thread order
+ *  (the static report, the `by_model` buckets); do NOT "fix" outdated threads to
+ *  sort last — that would diverge from the spine. Never invents a line. Stable for
+ *  ties (insertion order preserved). */
 export function orderThreads(threads: TimelineThread[]): TimelineThread[] {
   return threads
     .map((t, i) => ({ t, i }))
     .sort((a, b) => {
-      const la = a.t.line ?? Number.POSITIVE_INFINITY;
-      const lb = b.t.line ?? Number.POSITIVE_INFINITY;
-      return la !== lb ? la - lb : a.i - b.i;
+      // line-less (outdated) threads lead, mirroring the spine's `None`-first sort.
+      const aHasLine = a.t.line != null;
+      const bHasLine = b.t.line != null;
+      if (aHasLine !== bHasLine) return aHasLine ? 1 : -1;
+      if (!aHasLine) return a.i - b.i; // both line-less: stable insertion order
+      return a.t.line! !== b.t.line! ? a.t.line! - b.t.line! : a.i - b.i;
     })
     .map((x) => x.t);
 }
@@ -301,14 +315,18 @@ export function buildCommentTimeline(context: ContextData): CommentTimeline {
   const comments = context.pr_comments;
   const groups: TimelineGroup[] = [];
   let threadTotal = 0;
-  let derivedTotal = 0;
+  let commentTotal = 0;
 
+  // The spine emits `by_model` in node-id order (`pr_comment_render.rs:151`); we
+  // walk it in array order, which preserves that emitted order verbatim (no
+  // re-sort of buckets here — only the threads WITHIN a bucket are ordered, to
+  // match the spine's within-bucket sort; see `orderThreads`).
   for (const b of comments?.by_model ?? []) {
     const threads = orderThreads((b.threads ?? []).map(toTimelineThread));
     if (threads.length === 0) continue;
     const commentCount = threads.reduce((n, t) => n + t.commentCount, 0);
     threadTotal += threads.length;
-    derivedTotal += commentCount;
+    commentTotal += commentCount;
     groups.push({
       model: bucketName(b) ?? b.model ?? null,
       ...(b.model_path ?? b.path ? { path: b.model_path ?? b.path } : {}),
@@ -322,7 +340,7 @@ export function buildCommentTimeline(context: ContextData): CommentTimeline {
   if (unanchored.length > 0) {
     const commentCount = unanchored.reduce((n, t) => n + t.commentCount, 0);
     threadTotal += unanchored.length;
-    derivedTotal += commentCount;
+    commentTotal += commentCount;
     groups.push({
       model: null,
       threads: unanchored,
@@ -333,7 +351,10 @@ export function buildCommentTimeline(context: ContextData): CommentTimeline {
 
   return {
     groups,
-    total: comments?.total ?? derivedTotal,
+    // `total` is the COMMENT count — always the locally-summed comment total, never
+    // the spine's `pr_comments.total` (a THREAD count). `threadTotal` carries the
+    // thread count, so the view can label each number with its true noun.
+    total: commentTotal,
     threadTotal,
     hasComments: threadTotal > 0,
   };
