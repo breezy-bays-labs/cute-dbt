@@ -14,6 +14,7 @@ import { useKeydown } from "../data/use-keydown";
 import { deriveView } from "../data/nav-slice";
 import { buildContexts, mentionCandidates } from "../domain/reshape";
 import { buildDataset, type ScopeAxis } from "../domain/data/dataset";
+import { buildPrOverview, buildPrFiles, buildCommentTimeline, prTimelineFeed } from "../domain/pr-page";
 import { shikiName, ensureHighlighter, type AppTheme } from "../domain/highlighter";
 import type { ContextData } from "../domain/context-data";
 import { ENTITY_NOUN } from "../domain/matrix";
@@ -39,6 +40,11 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   const context = useMemo(() => loadFixture("context.440") as unknown as ContextData, []);
   const contexts = useMemo(() => buildContexts(context), [context]);
   const dataset = useMemo(() => buildDataset(context), [context]);
+  // ── S9 PR-page aggregation (pure folds; rebuilt only when the context changes) ─
+  const prOverview = useMemo(() => buildPrOverview(context), [context]);
+  const prFiles = useMemo(() => buildPrFiles(context), [context]);
+  const prTimeline = useMemo(() => buildCommentTimeline(context), [context]);
+  const prFeed = useMemo(() => prTimelineFeed(context), [context]);
 
   // ── store subscriptions (the chrome owns them) ───────────────────────────
   const entity = useAppStore((s) => s.entity);
@@ -354,6 +360,21 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
               if (activeName != null) addReviewDraft(activeName, d);
             }}
             onMarkReviewed={onMarkReviewed}
+            // ── S9 PR-page props (overview / files / comment timeline) ───────
+            prOverview={prOverview}
+            prFiles={prFiles}
+            prTimeline={prTimeline}
+            prFeed={prFeed}
+            onOpenModel={(name) => {
+              // a PR file / comment-thread row opens that model in the Models
+              // review surface — jump to the Models entity, select the model, and
+              // land on the code-review (diff) surface (the reviewable surface the
+              // prototype's "open in code ↗" affordance targets).
+              setEntity("models" as Entity);
+              setSel(name, "models" as Entity);
+              setView2("code");
+              setCodeMode("diff");
+            }}
           />
         </main>
       </div>
