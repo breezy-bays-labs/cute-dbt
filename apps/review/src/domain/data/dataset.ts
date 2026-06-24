@@ -453,6 +453,17 @@ export interface Dataset {
   seedRecords: Record<string, SeedRecord>;
   prScope: PrScope["data"] | null;
   prSelectable: string[];
+  /**
+   * The MODEL-ONLY review scope (cute-dbt#495): `prSelectable` filtered to ids
+   * that are actual MODELS (own keys of `D`). `prSelectable` carries every
+   * non-connector/non-halo PR-scope node — INCLUDING seeds + macros, which belong
+   * to their own entities, not the Models review LOOP. The keyboard `x`/`N` loop,
+   * the progress chip, and `markReviewedAdvance` ALL walk THIS list so they never
+   * advance onto a recordless seed/macro (which would show the wrong model's diff
+   * while marking the seed/macro reviewed — the never-a-false-claim violation).
+   * Falls back to `MODELS` when the PR scope is empty (parity with prSelectable).
+   */
+  prSelectableModels: string[];
   prScopeByAxis: Record<string, PrScope | null>;
 }
 
@@ -545,11 +556,20 @@ export function buildDataset(data: ContextData): Dataset {
   const prScopeBuilt = prDagToScope(data.pr_dag, schemaByName, matByName, changeByName);
   attachDownstream(prScopeBuilt, MODELS, D);
 
+  const prSelectable = prScopeBuilt ? prScopeBuilt.selectable : MODELS;
+  // the MODEL-ONLY review scope: drop the seed/macro/non-model ids prSelectable
+  // carries — they have no record in D and belong to their own entities, not the
+  // Models review loop. (cute-dbt#495: the keyboard `x`/`N` loop + the progress
+  // chip + markReviewedAdvance all walk THIS list, so they never advance onto a
+  // recordless seed/macro.)
+  const prSelectableModels = prSelectable.filter((id) => !!D[id]);
+
   const ds: Dataset = {
     D, CTE, MODELS, seeds, seedRecords,
     SCOPE: buildScope(data, MODELS.length),
     prScope: prScopeBuilt ? prScopeBuilt.data : null,
-    prSelectable: prScopeBuilt ? prScopeBuilt.selectable : MODELS,
+    prSelectable,
+    prSelectableModels,
     prScopeByAxis: buildScopeByAxis(data, prScopeBuilt, schemaByName, matByName, changeByName),
   };
   _cache.set(data, ds);

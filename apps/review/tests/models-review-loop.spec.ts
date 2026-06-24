@@ -158,3 +158,65 @@ test("V1 flow-acceptance: Models reviewable end-to-end, KEYBOARD-ONLY (network-d
   expect(external, `external requests: ${external.join(", ")}`).toEqual([]);
   expect(pageErrors, `page errors: ${pageErrors.join(" | ")}`).toEqual([]);
 });
+
+// cute-dbt#495 findings #1+#2: the Models review LOOP walks MODELS ONLY. The
+// dogfood scope (prSelectable) carries a SEED (`raw_payments`) + a MACRO
+// (`cents_to_dollars`); the loop must never select them (they have no model
+// record → the surface would show the wrong model's diff) and never mark them
+// reviewed (the never-a-false-claim contract). The HEADLINE test above presses
+// `x` only twice (positions 0→1→2) so it never reaches the seed/macro scope
+// positions — this test drives `x` to LOOP-COMPLETION, the position the bug lives
+// at, and asserts the chip reaches an HONEST complete state over models only.
+test("V1 loop-completion: `x` to the end NEVER selects/marks the seed or macro (network-denied)", async ({ page }) => {
+  const external = await denyExternalNetwork(page);
+  const pageErrors: string[] = [];
+  page.on("pageerror", (e) => pageErrors.push("PAGEERROR: " + e.message));
+
+  await page.goto("/index.html", { waitUntil: "networkidle" });
+  await page.waitForSelector('[data-testid="entity-tabs"]');
+  await expect(page.locator('[data-testid="tab-models"]')).toHaveAttribute("data-active", "true");
+
+  const chip = page.getByTestId("review-progress");
+  const chip0 = (await chip.textContent()) ?? "";
+  const total = Number(/✓\s*\d+\/(\d+)/.exec(chip0)?.[1] ?? "0");
+  expect(total, `progress chip total parsed from "${chip0}"`).toBeGreaterThan(2);
+
+  // the in-scope MODEL count the loop walks (= chip total). The seed + macro that
+  // contaminate prSelectable are NOT here (the sidebar renders the loop's set).
+  const sidebarModels = await page.locator('[data-testid="model-list-item"]').evaluateAll(
+    (els) => els.map((e) => e.getAttribute("data-model") ?? ""),
+  );
+  expect(sidebarModels.length, "the sidebar renders exactly the in-scope models").toBe(total);
+  expect(sidebarModels, "the seed is not a reviewable model").not.toContain("raw_payments");
+  expect(sidebarModels, "the macro is not a reviewable model").not.toContain("cents_to_dollars");
+
+  // drive `x` to loop-completion (one extra press past the count to prove it
+  // terminates without ever stepping onto a non-model).
+  const selectedDuringLoop = new Set<string>();
+  for (let i = 0; i < total + 2; i++) {
+    const sel = (await reviewState(page)).selModels;
+    if (sel) selectedDuringLoop.add(sel);
+    await page.keyboard.press("x");
+  }
+
+  // every id the loop SELECTED is a real model (never the seed/macro) — the surface
+  // always showed the diff of the model that got marked.
+  expect([...selectedDuringLoop], "the loop never selected the seed").not.toContain("raw_payments");
+  expect([...selectedDuringLoop], "the loop never selected the macro").not.toContain("cents_to_dollars");
+
+  const done = await reviewState(page);
+  const reviewedIds = Object.keys(done.reviewed);
+  // the seed + macro are NEVER in the reviewed set (finding #2's over-count).
+  expect(done.reviewed["raw_payments"], "the seed was never marked reviewed").toBeUndefined();
+  expect(done.reviewed["cents_to_dollars"], "the macro was never marked reviewed").toBeUndefined();
+  // EXACTLY the in-scope models are reviewed (an HONEST complete, count == total).
+  expect(reviewedIds.length, "reviewed count == in-scope model total (honest complete)").toBe(total);
+  reviewedIds.forEach((id) =>
+    expect(sidebarModels, `reviewed ${id} is one of the in-scope models`).toContain(id),
+  );
+  // the chip reads the honest complete state (✓ total/total).
+  await expect(chip).toHaveText(new RegExp(`✓\\s*${total}/${total}`));
+
+  expect(external, `external requests: ${external.join(", ")}`).toEqual([]);
+  expect(pageErrors, `page errors: ${pageErrors.join(" | ")}`).toEqual([]);
+});

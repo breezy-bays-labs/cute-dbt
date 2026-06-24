@@ -239,4 +239,56 @@ describe("applyDispatch — V1 review-flow handlers", () => {
     applyDispatch({ kind: "cycle-instance", dir: 1 });
     expect(useAppStore.getState().sel.models).toBe(first);
   });
+
+  // ── cute-dbt#495 finding #1: the review scope is MODELS only ────────────────
+  // prSelectable carries a seed (`raw_payments`) + a macro (`cents_to_dollars`)
+  // in the dogfood fixture; the review LOOP must NOT walk them (they have no
+  // record in D, so advancing onto one shows the WRONG model's diff while marking
+  // the seed/macro reviewed). The E2E only presses `x` twice, never reaching the
+  // seed/macro positions — these cases drive the loop to COMPLETION.
+  it("the review scope excludes the seed + macro prSelectable carries", () => {
+    const st = useAppStore.getState();
+    st.setEntity("models");
+    const scope = reviewScope(st);
+    const ds = dataSlice(st.activeSource);
+    // the contaminated source still carries the non-models …
+    expect(ds.prSelectable).toContain("raw_payments");
+    expect(ds.prSelectable).toContain("cents_to_dollars");
+    // … but the LOOP scope drops them and contains ONLY real models.
+    expect(scope).not.toContain("raw_payments");
+    expect(scope).not.toContain("cents_to_dollars");
+    scope.forEach((id) => expect(ds.D[id], `${id} must be a model with a record`).toBeDefined());
+  });
+
+  it("driving `x` to loop-completion NEVER selects or marks a non-model (seed/macro)", () => {
+    const st0 = useAppStore.getState();
+    st0.setEntity("models");
+    const scope = reviewScope(st0);
+    st0.setSel(scope[0]!, "models");
+    // mark every model reviewed by repeatedly pressing `x` (one more than scope
+    // length to prove it terminates without ever touching a non-model).
+    const visited: string[] = [];
+    for (let i = 0; i < scope.length + 2; i++) {
+      const cur = useAppStore.getState().sel.models;
+      if (cur) visited.push(cur);
+      applyDispatch({ kind: "mark-reviewed-advance" });
+    }
+    const st = useAppStore.getState();
+    const ds = dataSlice(st.activeSource);
+    // every id the loop ever SELECTED is a real model (never a seed/macro).
+    visited.forEach((id) => {
+      expect(ds.D[id], `selected ${id} must be a model`).toBeDefined();
+      expect(id).not.toBe("raw_payments");
+      expect(id).not.toBe("cents_to_dollars");
+    });
+    // every id the loop ever MARKED reviewed is a real model (the seed/macro are
+    // NEVER in the reviewed set — the never-a-false-claim contract).
+    Object.keys(st.review.reviewed).forEach((id) => {
+      expect(ds.D[id], `reviewed ${id} must be a model`).toBeDefined();
+    });
+    expect(st.review.reviewed["raw_payments"]).toBeUndefined();
+    expect(st.review.reviewed["cents_to_dollars"]).toBeUndefined();
+    // the loop completes: every in-scope MODEL is reviewed, nothing else.
+    expect(Object.keys(st.review.reviewed).sort()).toEqual([...scope].sort());
+  });
 });

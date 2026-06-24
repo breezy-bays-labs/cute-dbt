@@ -118,20 +118,34 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
     return () => window.removeEventListener("keydown", onEsc, { capture: true });
   }, [overlays.review, closeOverlay]);
 
+  // ── the in-scope MODEL set — the SINGLE source the sidebar, the SubHeader
+  //    instance list, activeName, the chip total, AND the keyboard loop share
+  //    (cute-dbt#495). prSelectableModels has dropped the seed/macro ids
+  //    prSelectable carries; the review loop walks models only, so the sidebar +
+  //    the loop + the chip can never disagree about which set is reviewable. ────
+  const reviewScopeModels = dataset.prSelectableModels;
+  const scopeModels = useMemo(
+    () => reviewScopeModels.map((n) => context.models.find((m) => m.name === n)).filter((m): m is NonNullable<typeof m> => !!m),
+    [reviewScopeModels, context],
+  );
+
   // ── resolve the active model + context (Models surfaces) ──────────────────
+  // activeName is valid only when sel.models is IN SCOPE (a reviewable model);
+  // a stale/out-of-scope sel falls back to the first in-scope model — never a
+  // non-model (the seed/macro sel that drove the wrong-diff bug).
   const activeName =
-    (entity === "models" && sel.models && context.models.some((m) => m.name === sel.models)
+    (entity === "models" && sel.models && reviewScopeModels.includes(sel.models)
       ? sel.models
       : null) ??
+    scopeModels[0]?.name ??
     context.models[0]?.name ??
     null;
   const model = context.models.find((m) => m.name === activeName) ?? context.models[0];
   const ctx = contexts.find((c) => c.name === activeName) ?? contexts[0];
   const shiki = shikiName(settings.theme as AppTheme);
 
-  // ── instance list per entity (S2: models from the fixture; others stubbed) ─
-  const modelNames = useMemo(() => context.models.map((m) => m.name), [context]);
-  const instances: readonly string[] = entity === "models" ? modelNames : [];
+  // ── instance list per entity (S2: the in-scope models; others stubbed) ─────
+  const instances: readonly string[] = entity === "models" ? reviewScopeModels : [];
 
   // ── PR reviewers (the comment composer's @-mention picker source) ──────────
   // Login STRINGS only (author + reviewer logins, deduped) — the picker calls
@@ -147,13 +161,6 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   }, [model]);
 
   // ── V1 review-flow derivations (the REAL header chip + per-model state) ────
-  // the review SCOPE: the in-scope models the reviewer walks (the PR-scope
-  // selectable set when present, else every model). This is what reviewed/total
-  // counts over — never the full manifest if the PR scoped fewer.
-  const reviewScopeModels = useMemo(
-    () => (dataset.prSelectable.length ? dataset.prSelectable : dataset.MODELS),
-    [dataset],
-  );
   // the open-thread count: live (non-outdated, line-anchored) threads across the
   // in-scope models, MINUS the ones the reviewer resolved this session. REAL —
   // computed from the dataset, never fabricated.
@@ -291,9 +298,9 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
             data-testid="model-list"
             className="h-full w-64 shrink-0 overflow-auto border-r border-zinc-800 p-3"
           >
-            <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">Models ({modelNames.length})</div>
+            <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">Models ({scopeModels.length})</div>
             <ul>
-              {context.models.map((m) => (
+              {scopeModels.map((m) => (
                 <li key={m.name}>
                   <button
                     data-testid="model-list-item"

@@ -27,12 +27,14 @@ import type { AppState } from "./store";
 
 // ── V1 flow-handler helpers (data layer; pure derivations off the live store) ──
 
-/** The in-scope model list (the review LOOP's scope) for the active context. */
+/** The in-scope MODEL list (the review LOOP's scope) for the active context. */
 export function reviewScope(st: AppState): string[] {
-  // the PR-scope selectable set is the review scope when present (the in-scope
-  // models the reviewer walks); fall back to every model the dataset carries.
-  const ds = dataSlice(st.activeSource);
-  return ds.prSelectable.length ? ds.prSelectable : ds.MODELS;
+  // the PR-scope selectable MODELS the reviewer walks — prSelectableModels has
+  // already dropped the seed/macro/non-model ids prSelectable carries (cute-dbt#495)
+  // and falls back to every model when the PR scope is empty. The loop MUST walk
+  // models only: a recordless seed/macro id would show the wrong model's diff while
+  // marking the seed/macro reviewed (the never-a-false-claim violation).
+  return dataSlice(st.activeSource).prSelectableModels;
 }
 
 /**
