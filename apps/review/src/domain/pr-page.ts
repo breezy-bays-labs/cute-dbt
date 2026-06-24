@@ -15,8 +15,49 @@
 // LAYER: PURE DOMAIN — std + the context types only. No I/O, no React, no zustand.
 
 import type {
-  CommentsView, ContextData, PrDagGraph, PrDagState, PrRef, RenderedThread,
+  CommentsView, ContextData, ModelPayload, PrDagGraph, PrDagState, PrRef, RenderedThread,
 } from "./context-data";
+
+// ── Shared joins (model-path resolution + url safety) ────────────────────────
+
+/** Validate a pr_ref `url` before it is rendered into an `<a href>`. Accepts ONLY
+ *  an absolute `http:` / `https:` URL (case-insensitive). Any other scheme
+ *  (`javascript:`, `data:`, `file:`, …), a scheme-relative `//host`, or an
+ *  unparseable value yields `""` so the view omits the href — never an XSS vector.
+ *  Returns the ORIGINAL string (not the URL-normalized form) so a legitimate link
+ *  renders verbatim. */
+export function safeHttpUrl(url: string | undefined | null): string {
+  if (!url) return "";
+  let parsed: URL;
+  try {
+    // `new URL` requires an absolute URL — a bare `//host` or a relative path
+    // throws here (no base), which is exactly the reject we want.
+    parsed = new URL(url);
+  } catch {
+    return "";
+  }
+  const scheme = parsed.protocol.toLowerCase();
+  return scheme === "http:" || scheme === "https:" ? url : "";
+}
+
+/** Build a model NAME → project-relative `path` map from `context.models` (the
+ *  authoritative join source — the pr_dag node carries only the bare name). Used to
+ *  render the REAL file path on the Files list + the comment-timeline groups, with
+ *  the bare name as an honest fallback when a model carries no path.
+ *
+ *  NOTE on collisions: `models[]` is keyed in the context by the dbt unique_id, so
+ *  two same-named models in different packages each carry their own `path`; this
+ *  bare-name map would keep only the last. That is acceptable for the path LABEL
+ *  (both real paths are valid display strings), and the comment JOIN + React keys
+ *  are disambiguated on the unique_id elsewhere (see `threadCountsByModel` /
+ *  `PrFileRow.key`), so a path-label tie never merges two models' data. */
+export function modelPathByName(models: readonly ModelPayload[] | undefined): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const m of models ?? []) {
+    if (m.path) out.set(m.name, m.path);
+  }
+  return out;
+}
 
 // ── PR overview ──────────────────────────────────────────────────────────────
 
@@ -104,7 +145,9 @@ export function buildPrOverview(context: ContextData): PrOverview {
   return {
     number: ref?.number ?? 0,
     title: ref?.title ?? "",
-    url: ref?.url ?? "",
+    // scheme-validated: only http(s) survives into the rendered <a href> — a
+    // `javascript:` / `data:` / scheme-relative url degrades to "" (no link).
+    url: safeHttpUrl(ref?.url),
     ...(ref?.body != null ? { body: ref.body } : {}),
     ...(ref?.author != null ? { author: ref.author } : {}),
     counts: countPrChanges(graph, removedModels),
@@ -122,7 +165,13 @@ export interface PrFileRow {
   /** the model name (= the Models-entity sel target) for a live node; the file
    *  path stem for a removed model (which has no live model record). */
   id: string;
-  /** the project-relative path when known (removed files carry their full path). */
+  /** a STABLE, package-collision-free React key: the dbt unique_id for a live node
+   *  (`model.<pkg>.<name>`), or the full file path for a removed model. Two
+   *  same-named models in different packages get distinct keys (their bare `id`
+   *  would collide). */
+  key: string;
+  /** the project-relative path when known (the real models[].path; removed files
+   *  carry their full path; a model with no path falls back to its bare name). */
   path: string;
   /** the change role (drives the chip color + whether the row is navigable). */
   change: PrChangeRole;
@@ -166,21 +215,32 @@ function bucketName(b: { model?: string; path?: string; model_path?: string }): 
 /** A per-model thread-count summary keyed by the bare model name. */
 export interface ThreadCounts { total: number; resolved: number; }
 
-/** Build the per-model thread-count map from pr_comments.by_model (joined on the
- *  bare model name). Unanchored threads are NOT joined to a model row (they have no
- *  model anchor) — they surface only in the timeline, never inflate a file's count. */
+/** The JOIN KEY for a comment bucket: the dbt unique_id (`model` — `model.<pkg>.<x>`)
+ *  when the spine carries it, else the bare model name. Keying on the unique_id is
+ *  collision-free across packages (two `model.a.x` / `model.b.x` never merge); only
+ *  a name-only bucket (no `model`) falls back to the bare name. */
+function bucketKey(b: { model?: string; path?: string; model_path?: string }): string | undefined {
+  return b.model ?? bucketName(b);
+}
+
+/** Build the per-model thread-count map from pr_comments.by_model, keyed on the
+ *  bucket JOIN KEY (the unique_id when present, else the bare name — `bucketKey`).
+ *  Keying on the unique_id is package-collision-free: two same-named models in
+ *  different packages get distinct buckets, never a merged count. Unanchored
+ *  threads are NOT joined to a model row (they have no model anchor) — they surface
+ *  only in the timeline, never inflate a file's count. */
 export function threadCountsByModel(
   comments: CommentsView | null | undefined,
 ): Record<string, ThreadCounts> {
-  // null-proto map: keys are untrusted model names off the wire.
+  // null-proto map: keys are untrusted model ids off the wire.
   const out: Record<string, ThreadCounts> = Object.create(null) as Record<string, ThreadCounts>;
   for (const b of comments?.by_model ?? []) {
-    const name = bucketName(b);
-    if (!name) continue;
+    const key = bucketKey(b);
+    if (!key) continue;
     const threads = b.threads ?? [];
     const resolved = threads.filter((t) => t.resolved).length;
-    const prev = out[name] ?? { total: 0, resolved: 0 };
-    out[name] = { total: prev.total + threads.length, resolved: prev.resolved + resolved };
+    const prev = out[key] ?? { total: 0, resolved: 0 };
+    out[key] = { total: prev.total + threads.length, resolved: prev.resolved + resolved };
   }
   return out;
 }
@@ -188,15 +248,21 @@ export function threadCountsByModel(
 export function buildPrFiles(context: ContextData): PrFilesView {
   const graph = context.pr_dag?.graph;
   const counts = threadCountsByModel(context.pr_comments);
+  const paths = modelPathByName(context.models);
   const rows: PrFileRow[] = [];
 
   for (const n of graph?.nodes ?? []) {
     const change = nodeChangeRole(n);
     if (change === "context") continue; // connectors/halo aren't changed files
-    const tc = counts[n.name] ?? { total: 0, resolved: 0 };
+    // join on the dbt unique_id (collision-free across packages); the comment
+    // buckets key on the same unique_id (`bucketKey`). Fall back to the bare name
+    // only if no unique_id bucket matched (a name-only bucket on the wire).
+    const tc = counts[n.id] ?? counts[n.name] ?? { total: 0, resolved: 0 };
     rows.push({
       id: n.name,
-      path: n.name,
+      key: n.id, // the unique_id — package-collision-free React key
+      // the REAL project-relative path when models[] carries it, else the bare name.
+      path: paths.get(n.name) ?? n.name,
       change,
       linesAdded: n.lines_added ?? 0,
       linesRemoved: n.lines_removed ?? 0,
@@ -211,7 +277,7 @@ export function buildPrFiles(context: ContextData): PrFilesView {
   for (const path of context.removed_models ?? []) {
     const stem = path.split("/").pop()?.replace(/\.\w+$/, "") ?? path;
     rows.push({
-      id: stem, path, change: "deleted",
+      id: stem, key: path, path, change: "deleted",
       linesAdded: 0, linesRemoved: 0,
       threadTotal: 0, threadResolved: 0,
       navigable: false,
@@ -247,7 +313,13 @@ export interface TimelineThread {
 export interface TimelineGroup {
   /** the model name, or null for the unanchored group. */
   model: string | null;
-  /** the display path (the model_path/path of the bucket, or undefined). */
+  /** a STABLE, package-collision-free React key: the bucket's dbt unique_id
+   *  (`model.<pkg>.<name>`) when present, else the bare model name, else
+   *  `"_unanchored"`. Two same-named buckets in different packages get distinct
+   *  keys (the bare `model` name alone would collide). */
+  key: string;
+  /** the display path: the REAL models[].path (joined on the bare name) when known,
+   *  else the bucket's model_path/path, or undefined. */
   path?: string;
   threads: TimelineThread[];
   /** total comments across the group's threads. */
@@ -313,6 +385,7 @@ export function orderThreads(threads: TimelineThread[]): TimelineThread[] {
 
 export function buildCommentTimeline(context: ContextData): CommentTimeline {
   const comments = context.pr_comments;
+  const paths = modelPathByName(context.models);
   const groups: TimelineGroup[] = [];
   let threadTotal = 0;
   let commentTotal = 0;
@@ -327,9 +400,16 @@ export function buildCommentTimeline(context: ContextData): CommentTimeline {
     const commentCount = threads.reduce((n, t) => n + t.commentCount, 0);
     threadTotal += threads.length;
     commentTotal += commentCount;
+    const name = bucketName(b) ?? b.model ?? null;
+    // the REAL models[].path (joined on the bare name) wins; fall back to the
+    // bucket's own model_path/path when the model carries no path.
+    const realPath = name ? paths.get(name) : undefined;
+    const path = realPath ?? b.model_path ?? b.path;
     groups.push({
-      model: bucketName(b) ?? b.model ?? null,
-      ...(b.model_path ?? b.path ? { path: b.model_path ?? b.path } : {}),
+      model: name,
+      // collision-free key: the unique_id when present, else the bare name.
+      key: bucketKey(b) ?? name ?? "_unanchored",
+      ...(path ? { path } : {}),
       threads,
       commentCount,
       resolvedCount: threads.filter((t) => t.resolved).length,
@@ -343,6 +423,7 @@ export function buildCommentTimeline(context: ContextData): CommentTimeline {
     commentTotal += commentCount;
     groups.push({
       model: null,
+      key: "_unanchored",
       threads: unanchored,
       commentCount,
       resolvedCount: unanchored.filter((t) => t.resolved).length,

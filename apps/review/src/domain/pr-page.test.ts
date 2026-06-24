@@ -12,6 +12,7 @@ import { describe, it, expect } from "vitest";
 import {
   buildPrOverview, buildPrFiles, buildCommentTimeline, prTimelineFeed,
   countPrChanges, nodeChangeRole, threadCountsByModel, orderThreads,
+  safeHttpUrl, modelPathByName,
   type TimelineThread,
 } from "./pr-page";
 import type { ContextData, PrDagGraph } from "./context-data";
@@ -96,21 +97,102 @@ describe("buildPrOverview", () => {
     expect(o.author).toBeUndefined();
   });
   it("carries optional pr_ref body/author only when the spine emits them", () => {
-    const o = buildPrOverview(synthCtx({ pr_ref: { number: 7, title: "t", url: "u", body: "hi", author: "alice" } }));
+    const o = buildPrOverview(synthCtx({ pr_ref: { number: 7, title: "t", url: "https://x/y", body: "hi", author: "alice" } }));
     expect(o.body).toBe("hi");
     expect(o.author).toBe("alice");
+  });
+  it("drops a dangerous (javascript:/data:) pr_ref url so it can't reach the href", () => {
+    const js = buildPrOverview(synthCtx({ pr_ref: { number: 1, title: "t", url: "javascript:alert(1)" } }));
+    expect(js.url).toBe("");
+    const data = buildPrOverview(synthCtx({ pr_ref: { number: 1, title: "t", url: "data:text/html,<script>1</script>" } }));
+    expect(data.url).toBe("");
+  });
+  it("passes a normal https pr_ref url through unchanged", () => {
+    const o = buildPrOverview(synthCtx({ pr_ref: { number: 1, title: "t", url: "https://github.com/o/r/pull/9" } }));
+    expect(o.url).toBe("https://github.com/o/r/pull/9");
   });
 });
 
 describe("threadCountsByModel", () => {
-  it("joins thread counts on the bare model name (from the unique_id)", () => {
+  it("joins thread counts on the dbt unique_id (collision-free across packages)", () => {
     const counts = threadCountsByModel(real.pr_comments);
-    // customer_order_days has 1 thread; order_metrics has 2; customers_with_no_orders 1 resolved.
-    expect(counts["order_metrics"]?.total).toBe(2);
-    expect(counts["customers_with_no_orders"]?.resolved).toBe(1);
+    // the 440 buckets key on the unique_id (`model.jaffle_shop.<name>`).
+    // order_metrics has 2 threads; customers_with_no_orders has 1 resolved.
+    expect(counts["model.jaffle_shop.order_metrics"]?.total).toBe(2);
+    expect(counts["model.jaffle_shop.customers_with_no_orders"]?.resolved).toBe(1);
+  });
+  it("two same-named models in different packages do NOT merge counts", () => {
+    const counts = threadCountsByModel({
+      by_model: [
+        { model: "model.pkg_a.orders", threads: [{ resolved: false, comments: [] }] },
+        { model: "model.pkg_b.orders", threads: [{ resolved: true, comments: [] }, { resolved: false, comments: [] }] },
+      ],
+    });
+    // keyed on the unique_id — never merged onto a single `orders` bucket.
+    expect(counts["model.pkg_a.orders"]?.total).toBe(1);
+    expect(counts["model.pkg_b.orders"]?.total).toBe(2);
+    expect(counts["model.pkg_b.orders"]?.resolved).toBe(1);
+    expect(counts["orders"]).toBeUndefined(); // never collapsed to the bare name
+  });
+  it("a name-only bucket (no unique_id) falls back to the bare name", () => {
+    const counts = threadCountsByModel({
+      by_model: [{ model_path: "models/x.sql", threads: [{ resolved: false, comments: [] }] }],
+    });
+    expect(counts["x"]?.total).toBe(1);
   });
   it("an absent comments view yields an empty map", () => {
     expect(Object.keys(threadCountsByModel(undefined))).toHaveLength(0);
+  });
+});
+
+describe("safeHttpUrl (XSS-safe href validation)", () => {
+  it("passes a normal https url through verbatim", () => {
+    expect(safeHttpUrl("https://github.com/org/repo/pull/440")).toBe("https://github.com/org/repo/pull/440");
+  });
+  it("passes a plain http url through", () => {
+    expect(safeHttpUrl("http://example.com/x")).toBe("http://example.com/x");
+  });
+  it("accepts the scheme case-insensitively", () => {
+    expect(safeHttpUrl("HTTPS://example.com")).toBe("HTTPS://example.com");
+  });
+  it("drops a javascript: url (XSS vector)", () => {
+    expect(safeHttpUrl("javascript:alert(1)")).toBe("");
+  });
+  it("drops a data: url", () => {
+    expect(safeHttpUrl("data:text/html,<script>alert(1)</script>")).toBe("");
+  });
+  it("drops a file: url and other non-http schemes", () => {
+    expect(safeHttpUrl("file:///etc/passwd")).toBe("");
+  });
+  it("drops a scheme-relative //host (no absolute scheme)", () => {
+    expect(safeHttpUrl("//evil.example.com/x")).toBe("");
+  });
+  it("drops an unparseable / relative value", () => {
+    expect(safeHttpUrl("not a url")).toBe("");
+    expect(safeHttpUrl("/relative/path")).toBe("");
+  });
+  it("drops empty/absent input", () => {
+    expect(safeHttpUrl("")).toBe("");
+    expect(safeHttpUrl(undefined)).toBe("");
+    expect(safeHttpUrl(null)).toBe("");
+  });
+});
+
+describe("modelPathByName", () => {
+  it("maps each model NAME to its real project-relative path", () => {
+    const m = modelPathByName([
+      { name: "orders", path: "models/marts/orders.sql", dag: { nodes: [], edges: [] }, compiled_sql: {} },
+      { name: "stg_orders", path: "models/staging/stg_orders.sql", dag: { nodes: [], edges: [] }, compiled_sql: {} },
+    ]);
+    expect(m.get("orders")).toBe("models/marts/orders.sql");
+    expect(m.get("stg_orders")).toBe("models/staging/stg_orders.sql");
+  });
+  it("omits a model with no path (honest fallback handled by the caller)", () => {
+    const m = modelPathByName([{ name: "x", dag: { nodes: [], edges: [] }, compiled_sql: {} }]);
+    expect(m.has("x")).toBe(false);
+  });
+  it("an absent models list yields an empty map", () => {
+    expect(modelPathByName(undefined).size).toBe(0);
   });
 });
 
@@ -137,6 +219,49 @@ describe("buildPrFiles", () => {
     const cwno = v.rows.find((r) => r.id === "customers_with_no_orders");
     expect(cwno?.threadResolved).toBe(1);
     expect(v.withThreads).toBeGreaterThan(0);
+  });
+  it("uses the REAL project-relative path (from models[]) for a live row, not the bare name", () => {
+    const v = buildPrFiles(real);
+    const om = v.rows.find((r) => r.id === "order_metrics");
+    // models[].path carries the real path; the row must show it, not "order_metrics".
+    expect(om?.path).toBe("models/marts/order_metrics.sql");
+    expect(om?.path).not.toBe(om?.id);
+  });
+  it("falls back to the bare name when a model carries no path", () => {
+    const g: PrDagGraph = {
+      nodes: [{ id: "model.p.lonely", name: "lonely", state: "modified", is_connector: false, lines_added: 1, lines_removed: 0 }],
+      edges: [],
+    };
+    const v = buildPrFiles(synthCtx({
+      pr_dag: { graph: g, modified_count: 1, connector_count: 0, halo_count: 0, deleted_count: 0, collapsed: false },
+      models: [{ name: "lonely", dag: { nodes: [], edges: [] }, compiled_sql: {} }], // no path
+    }));
+    expect(v.rows[0]!.path).toBe("lonely");
+  });
+  it("carries a package-collision-free React key (the unique_id) per live row", () => {
+    const g: PrDagGraph = {
+      nodes: [
+        { id: "model.pkg_a.orders", name: "orders", state: "modified", is_connector: false, lines_added: 1, lines_removed: 0 },
+        { id: "model.pkg_b.orders", name: "orders", state: "modified", is_connector: false, lines_added: 2, lines_removed: 0 },
+      ],
+      edges: [],
+    };
+    const v = buildPrFiles(synthCtx({
+      pr_dag: { graph: g, modified_count: 2, connector_count: 0, halo_count: 0, deleted_count: 0, collapsed: false },
+      pr_comments: {
+        by_model: [
+          { model: "model.pkg_a.orders", threads: [{ resolved: false, comments: [] }] },
+          { model: "model.pkg_b.orders", threads: [{ resolved: false, comments: [] }, { resolved: false, comments: [] }] },
+        ],
+      },
+    }));
+    // two same-bare-name rows: their keys (unique_ids) are distinct → no React collision.
+    const keys = v.rows.map((r) => r.key);
+    expect(keys).toEqual(["model.pkg_a.orders", "model.pkg_b.orders"]);
+    expect(new Set(keys).size).toBe(keys.length);
+    // and the comment counts do NOT merge onto one row.
+    expect(v.rows[0]!.threadTotal).toBe(1);
+    expect(v.rows[1]!.threadTotal).toBe(2);
   });
   it("a context (connector/halo) node is never a file row", () => {
     const v = buildPrFiles(synthCtx({ pr_dag: { graph, modified_count: 1, connector_count: 1, halo_count: 1, deleted_count: 1, collapsed: false } }));
@@ -227,6 +352,33 @@ describe("buildCommentTimeline", () => {
     const ctx = synthCtx({ pr_comments: { by_model: [{ model: "model.p.x", threads: [{ comments: [{ author: "a", body: "1" }, { author: "b", body: "2" }] }] }] } });
     const tl = buildCommentTimeline(ctx);
     expect(tl.total).toBe(2);
+  });
+  it("resolves each group's path from models[] (the real project-relative path)", () => {
+    const tl = buildCommentTimeline(real);
+    const om = tl.groups.find((g) => g.model === "order_metrics");
+    expect(om?.path).toBe("models/marts/order_metrics.sql");
+  });
+  it("gives each group a package-collision-free key (the unique_id)", () => {
+    const ctx = synthCtx({
+      pr_comments: {
+        by_model: [
+          { model: "model.pkg_a.orders", threads: [{ comments: [{ author: "a", body: "1" }] }] },
+          { model: "model.pkg_b.orders", threads: [{ comments: [{ author: "b", body: "2" }] }] },
+        ],
+      },
+    });
+    const tl = buildCommentTimeline(ctx);
+    const keys = tl.groups.map((g) => g.key);
+    // two same-bare-name model groups → distinct keys (no React collision/merge).
+    expect(keys).toEqual(["model.pkg_a.orders", "model.pkg_b.orders"]);
+    expect(new Set(keys).size).toBe(keys.length);
+    // both groups survive as distinct sections (never collapsed onto "orders").
+    expect(tl.groups).toHaveLength(2);
+  });
+  it("the unanchored group carries the stable `_unanchored` key", () => {
+    const ctx = synthCtx({ pr_comments: { by_model: [], unanchored: [{ comments: [{ author: "a", body: "x" }] }] } });
+    const tl = buildCommentTimeline(ctx);
+    expect(tl.groups[0]!.key).toBe("_unanchored");
   });
 });
 

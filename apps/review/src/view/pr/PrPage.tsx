@@ -203,7 +203,7 @@ export function PrFiles({ files, onOpen }: { files: PrFilesView; onOpen?: (id: s
       {files.rows.length > 0 ? (
         <ul className="rounded-lg border" style={{ margin: 0, padding: 0, listStyle: "none", borderColor: "#2a2b36", overflow: "hidden" }}>
           {files.rows.map((r) => (
-            <FileRow key={`${r.change}:${r.path}`} row={r} onOpen={onOpen} />
+            <FileRow key={r.key} row={r} onOpen={onOpen} />
           ))}
         </ul>
       ) : (
@@ -294,7 +294,7 @@ function Group({ group, onOpen }: { group: TimelineGroup; onOpen?: (id: string) 
       </div>
       <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
         {group.threads.map((t, i) => (
-          <ThreadCard key={`${group.model ?? "_"}:${t.path ?? ""}:${t.line ?? "x"}:${i}`} thread={t} />
+          <ThreadCard key={`${group.key}:${t.path ?? ""}:${t.line ?? "x"}:${i}`} thread={t} />
         ))}
       </div>
     </section>
@@ -367,7 +367,7 @@ export function PrTimeline({
       </div>
 
       {timeline.hasComments ? (
-        timeline.groups.map((g) => <Group key={g.model ?? "_unanchored"} group={g} onOpen={onOpen} />)
+        timeline.groups.map((g) => <Group key={g.key} group={g} onOpen={onOpen} />)
       ) : (
         <p data-testid="timeline-empty" style={{ fontSize: 13, color: "#6c7086" }}>
           No conversation in this context.
