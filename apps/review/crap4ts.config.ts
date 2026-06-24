@@ -11,6 +11,14 @@ import { defineConfig } from "crap4ts";
 // wiring exercised by the Playwright behavioral gate, not unit-CRAP targets.
 export default defineConfig({
   threshold: 25,
+  // STRICT ≤15 on the honesty-fold set (council §E, gating from S3b): the
+  // never-a-false-claim folds carry a tighter CRAP ceiling than the default 25.
+  // Per-glob overrides; a function in these files exceeding 15 fails the gate.
+  thresholds: {
+    "src/domain/data/cell-diff.ts": 15, // the cell key.t trichotomy (diffSide/cellSide/adaptDiffTable)
+    "src/domain/data/col-lineage.ts": 15, // buildColGraph / buildColEdges / confidence folds
+    "src/domain/data/raw-spans.ts": 15, // rawDagToGraph byte-span parsing + buildRawSpans
+  },
   coverageMetric: "line",
   src: ["src"],
   exclude: [

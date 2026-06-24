@@ -24,9 +24,19 @@ export const FIXTURE_IDS: readonly FixtureId[] = [
   "context.440.since-review",
 ] as const;
 
-/** Load + Zod-validate a fixture by id. Throws loudly on shape drift. */
+// Per-id validated cache: parseContext produces a FRESH object each call, but the
+// downstream WeakMap dataset memo (domain/data/dataset.ts) keys on object
+// identity — so loadFixture must return a STABLE reference per id for the memo to
+// hold. Validate once, then hand back the same parsed object.
+const _validated = new Map<FixtureId, ParsedContextData>();
+
+/** Load + Zod-validate a fixture by id (memoized per id). Throws loudly on shape drift. */
 export function loadFixture(id: FixtureId): ParsedContextData {
-  return parseContext(RAW[id]);
+  const hit = _validated.get(id);
+  if (hit) return hit;
+  const parsed = parseContext(RAW[id]);
+  _validated.set(id, parsed);
+  return parsed;
 }
 
 /** The raw (unvalidated) fixture payload — for the schema/drift tests. */

@@ -67,6 +67,7 @@ export interface ReviewContext {
 export function buildContexts(context: ContextData): ReviewContext[] {
   const threadsByPath = new Map<string, RenderedThread[]>();
   const add = (t: RenderedThread) => {
+    if (t.path == null) return; // an unanchored/path-less thread isn't file-joined
     const arr = threadsByPath.get(t.path) ?? [];
     arr.push(t);
     threadsByPath.set(t.path, arr);

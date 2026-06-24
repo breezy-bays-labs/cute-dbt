@@ -16,6 +16,8 @@ apps/*/coverage/
 apps/*/test-results/
 apps/*/playwright-report/
 apps/*/.vite/
+apps/*/.stryker-tmp/
+apps/*/reports/
 
 # Mutation testing
 **/mutants.out*/

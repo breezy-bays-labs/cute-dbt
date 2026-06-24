@@ -13,6 +13,7 @@
 // Immer powers the nested-map slices.
 import { create } from "zustand";
 import { persist, createJSONStorage, type PersistStorage, type StorageValue } from "zustand/middleware";
+import { createDataSlice, DATA_DEFAULTS, isDataSource, type DataSlice, type DataSource } from "./data-slice";
 import { createKeymapSlice, type KeymapSlice } from "./keymap-slice";
 import { createNavSlice, NAV_DEFAULTS, type NavSlice } from "./nav-slice";
 import { createUiSlice, UI_DEFAULTS, type UiSlice } from "./ui-slice";
@@ -31,8 +32,8 @@ import type { View } from "../domain/matrix";
 export const PERSIST_KEY = "cute-dbt:review";
 export const PERSIST_VERSION = 2;
 
-/** The full app state — the 5-slice union. */
-export type AppState = NavSlice & UiSlice & SettingsSlice & KeymapSlice;
+/** The full app state — the 6-slice union (nav · ui · settings · keymap · data). */
+export type AppState = NavSlice & UiSlice & SettingsSlice & KeymapSlice & DataSlice;
 
 /**
  * Sanitize a persisted keymap override on hydration (unchanged from S1): drop any
@@ -63,6 +64,8 @@ interface PersistedShape {
   sidebar: boolean;
   settings: Settings;
   keymapOverride: Keymap;
+  /** the active context source — the durable replacement for the module global. */
+  activeSource: DataSource;
 }
 
 /** What we write out (`partialize`) — the durable subset, under the prototype's key names. */
@@ -74,6 +77,7 @@ function partialize(s: AppState): PersistedShape {
     sidebar: s.overlays.sidebar,
     settings: s.settings,
     keymapOverride: s.keymapOverride,
+    activeSource: s.activeSource,
   };
 }
 
@@ -111,6 +115,9 @@ export function hydrateMerge(persisted: unknown): Partial<AppState> {
   };
   // keymap override: sanitized through the deny-list (reserved tokens can't survive).
   out.keymapOverride = sanitizeKeymapOverride(p.keymapOverride);
+  // active source: fail-closed to the default if the persisted value isn't a
+  // known source (a renamed/removed fixture in an old blob degrades gracefully).
+  out.activeSource = isDataSource(p.activeSource) ? p.activeSource : DATA_DEFAULTS.activeSource;
 
   return out;
 }
@@ -150,6 +157,8 @@ export function migratePersisted(persisted: unknown, version: number): Partial<A
       settings: typeof p.theme === "string" ? mergeSettings({ theme: p.theme }) : { ...SETTINGS_DEFAULTS },
       // keymapOverride kept the same key/meaning across v1→v2 (sanitized in hydrate).
       keymapOverride: sanitizeKeymapOverride(p.keymapOverride),
+      // activeSource is new in S3b — a v1 blob predates it; start at the default.
+      activeSource: DATA_DEFAULTS.activeSource,
     };
     return migrated as unknown as Partial<AppState>;
   }
@@ -209,6 +218,9 @@ export const useAppStore = create<AppState>()(
         set(partial as Partial<AppState> | ((s: AppState) => Partial<AppState>)),
       ),
       ...createKeymapSlice((partial) =>
+        set(partial as Partial<AppState> | ((s: AppState) => Partial<AppState>)),
+      ),
+      ...createDataSlice((partial) =>
         set(partial as Partial<AppState> | ((s: AppState) => Partial<AppState>)),
       ),
     }),

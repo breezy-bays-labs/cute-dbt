@@ -17,7 +17,8 @@ export function DiffViewer({ file, shiki }: { file: CtxFile; shiki: string }): R
   const foldedThreads = file.threads.filter((t) => t.outdated || t.line == null);
 
   const lineAnnotations = liveThreads.map((t) => ({
-    side: pierreSide(t.side),
+    // a live thread without an explicit side anchors to the new (added) side.
+    side: pierreSide(t.side ?? "Right"),
     lineNumber: t.line as number,
     metadata: t,
   }));
