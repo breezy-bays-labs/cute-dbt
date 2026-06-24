@@ -110,7 +110,10 @@ export function useKeydown(): void {
       // surface; the app dispatcher must not hijack it. This guard sits ABOVE
       // the pure input-guard rung: it short-circuits BEFORE canonicalization, so
       // Pierre's own in-shadow key handling (and the Composer textarea) is never
-      // intercepted. (Composer ⌘↵/esc still work — they stopPropagation locally.)
+      // intercepted. (This guard — not stopPropagation — is what keeps the
+      // Composer's ⌘↵/esc working: the Composer only preventDefaults; the
+      // TEXTAREA in the composedPath trips isInsideShadowOrEditable, so the app
+      // dispatcher returns early and never sees those keys.)
       const path = e.composedPath?.();
       if (isInsideShadowOrEditable(path)) return;
       // Canonicalize the physical key through the live (possibly rebound) keymap.

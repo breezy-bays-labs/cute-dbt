@@ -56,4 +56,14 @@ describe("parsePatchNav", () => {
     // start would not be new-line 2.
     expect(nav.starts[0]!.no).toBe(2);
   });
+
+  it("a trailing newline does not change maxNo or starts (off-by-one guard)", () => {
+    // split("\n") leaves a final "" element on a trailing-newline patch; lacking
+    // a sigil it would otherwise be counted as a context line, inflating maxNo
+    // by one and shifting the new-side gutter.
+    const withNl = parsePatchNav(PATCH + "\n");
+    const withoutNl = parsePatchNav(PATCH);
+    expect(withNl.maxNo).toBe(withoutNl.maxNo);
+    expect(withNl.starts).toEqual(withoutNl.starts);
+  });
 });

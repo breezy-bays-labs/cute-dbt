@@ -21,7 +21,12 @@ import type { RenderedThread } from "../../domain/context-data";
 import { CommentThread } from "./CommentThread";
 
 export interface PierreNavApi {
-  /** jump to the next/prev change-run by data-line number. */
+  /**
+   * jump to the next/prev change-run by data-line number. Until the keyboard
+   * slice (S6) wires the running cursor, these land on the FIRST / LAST anchor
+   * respectively (they expose the ordered anchors + a stateless jump, not a
+   * stepping cursor — see jump()).
+   */
   nextHunk: () => void;
   prevHunk: () => void;
   /** the ordered change-run anchors (data-line numbers, never array indices). */
@@ -116,6 +121,9 @@ export function PierreDiff({ file, shiki, reviewers = [], openAnchor, navRef }: 
   useEffect(() => {
     if (!openAnchor || openAnchor.line == null) return;
     let done = false;
+    // the currently-scheduled (re)try timeout — tracked so a pending RETRY (not
+    // just the initial schedule) is cleared on unmount and never fires late.
+    let pending: ReturnType<typeof setTimeout> | null = null;
     const t0 = Date.now();
     const findRow = (): HTMLElement | null => {
       const host = rootRef.current?.querySelector("diffs-container");
@@ -147,12 +155,12 @@ export function PierreDiff({ file, shiki, reviewers = [], openAnchor, navRef }: 
         flashRef.current = { el: row, t: setTimeout(() => row.classList.remove("kbd-ring"), 1500) };
         return;
       }
-      if (Date.now() - t0 < 3500) setTimeout(tryScroll, 80); // retry-until-mounted
+      if (Date.now() - t0 < 3500) pending = setTimeout(tryScroll, 80); // retry-until-mounted
     };
-    const id = setTimeout(tryScroll, 60);
+    pending = setTimeout(tryScroll, 60);
     return () => {
       done = true;
-      clearTimeout(id);
+      if (pending) clearTimeout(pending);
     };
   }, [openAnchor?.nonce, openAnchor?.line]);
 

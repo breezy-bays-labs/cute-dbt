@@ -10,7 +10,7 @@
 // the thread owns its compose UI) — the exact prototype discipline.
 //
 // LAYER: view (imports domain + sibling view).
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import type { RenderedThread } from "../../domain/context-data";
 import type { CodeLang } from "../../domain/code-highlighter";
 import { CommentBody } from "./Markdown";
@@ -56,6 +56,12 @@ export function CommentThread(props: CommentThreadProps): React.ReactElement {
 
   const [replying, setReplying] = useState(false);
   const [replyInit, setReplyInit] = useState("");
+  // last quoteNonce we acted on — guards the quote effect so it fires ONLY on a
+  // genuinely new quote command, not when `activeIdx`/`thread.comments` change
+  // (those are in the deps for exhaustive-deps correctness, but must not re-seed).
+  // Seeded to 0 (the nonce floor) so a mount with an already-bumped nonce still
+  // fires, matching the original `[quoteNonce]`-only effect's mount behavior.
+  const lastQuoteNonce = useRef(0);
 
   // ── nonce-command effects: a bumped nonce opens the relevant composer ──────
   // reply: open an empty reply box.
@@ -65,14 +71,18 @@ export function CommentThread(props: CommentThreadProps): React.ReactElement {
       setReplying(true);
     }
   }, [replyNonce]);
-  // quote: seed the reply box with the focused comment as a blockquote.
+  // quote: seed the reply box with the focused comment as a blockquote. Reads
+  // the LATEST activeIdx/comments (no stale closure) but only acts when the host
+  // bumps quoteNonce to a new value (the one-shot command semantics).
   useEffect(() => {
+    if (quoteNonce === lastQuoteNonce.current) return;
+    lastQuoteNonce.current = quoteNonce;
     if (quoteNonce && activeIdx >= 0 && thread.comments[activeIdx]) {
       const body = String(thread.comments[activeIdx].body ?? "");
       setReplyInit("> " + body.replace(/\n/g, "\n> ") + "\n\n");
       setReplying(true);
     }
-  }, [quoteNonce]);
+  }, [quoteNonce, activeIdx, thread.comments]);
   // jumping away from this thread closes any open composer.
   useEffect(() => {
     if (activeIdx < 0) setReplying(false);

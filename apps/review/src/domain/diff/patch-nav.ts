@@ -34,6 +34,9 @@ const HUNK_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
  */
 export function parsePatchNav(patch: string): NavData {
   const lines = String(patch ?? "").split("\n");
+  // a trailing newline leaves a final "" element; lacking a sigil it would be
+  // counted as a context line, inflating maxNo and shifting the new-side gutter.
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
   const starts: NavStart[] = [];
   let maxNo = 0;
   let inHunk = false;

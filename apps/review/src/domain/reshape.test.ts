@@ -9,6 +9,7 @@ import {
   blockDiffToPatch,
   sourceToContextPatch,
   buildContexts,
+  mentionCandidates,
   toFlow,
   toPrFlow,
 } from "./reshape";
@@ -33,6 +34,41 @@ describe("isLiveThread", () => {
   });
   it("is not live with a null line", () => {
     expect(isLiveThread({ ...base, line: null })).toBe(false);
+  });
+});
+
+describe("mentionCandidates (the @-mention picker source)", () => {
+  // Minimal ContextData stub — only pr_ref matters for this fold.
+  const ctx = (pr_ref: ContextData["pr_ref"]): ContextData =>
+    ({ baseline: "b", models: [], pr_comments: { total: 0, by_model: [] }, pr_ref }) as unknown as ContextData;
+
+  it("includes the PR author login and every reviewer login as plain strings", () => {
+    const out = mentionCandidates(
+      ctx({
+        number: 1,
+        title: "t",
+        url: "u",
+        author: "octocat",
+        reviewers: [{ login: "alice" }, { login: "bob", state: "APPROVED" }],
+      }),
+    );
+    expect(out).toEqual(["octocat", "alice", "bob"]);
+    // every candidate is a string, so the picker's `r.toLowerCase()` never throws.
+    expect(out.every((r) => typeof r === "string")).toBe(true);
+    expect(() => out.map((r) => r.toLowerCase())).not.toThrow();
+  });
+
+  it("the author leads the picker and is deduped against a reviewer of the same login", () => {
+    const out = mentionCandidates(
+      ctx({ number: 1, title: "t", url: "u", author: "octocat", reviewers: [{ login: "octocat" }, { login: "alice" }] }),
+    );
+    expect(out).toEqual(["octocat", "alice"]);
+    expect(out.indexOf("octocat")).toBe(0);
+  });
+
+  it("degrades to [] when pr_ref / author / reviewers are absent (no throw)", () => {
+    expect(mentionCandidates(ctx(undefined))).toEqual([]);
+    expect(mentionCandidates(ctx({ number: 1, title: "t", url: "u" }))).toEqual([]);
   });
 });
 

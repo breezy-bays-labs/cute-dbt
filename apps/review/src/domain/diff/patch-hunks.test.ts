@@ -47,4 +47,14 @@ describe("parsePatchHunks", () => {
   it("does not throw on malformed hunk headers", () => {
     expect(() => parsePatchHunks("@@ garbage @@\n+x")).not.toThrow();
   });
+
+  it("a trailing newline yields the same hunks as one without", () => {
+    // split("\n") on a trailing-newline patch leaves a final "" element which,
+    // lacking a sigil, would otherwise be parsed as a bogus context row (extra
+    // line + gutter counters off by one). The two parses must be identical.
+    const withNl = parsePatchHunks(PATCH + "\n");
+    const withoutNl = parsePatchHunks(PATCH);
+    expect(withNl).toEqual(withoutNl);
+    expect(withNl[0]!.lines.map((l) => l.t)).toEqual(["ctx", "del", "add", "ctx"]);
+  });
 });

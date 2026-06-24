@@ -26,6 +26,9 @@ const HUNK_RE = /^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/;
 
 export function parsePatchHunks(patch: string): Hunk[] {
   const lines = String(patch ?? "").split("\n");
+  // a trailing newline leaves a final "" element; lacking a sigil it would be
+  // parsed as a bogus context row (extra line + gutter counters off by one).
+  if (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
   const hunks: Hunk[] = [];
   let cur: Hunk | null = null;
   let oldNo = 0;
