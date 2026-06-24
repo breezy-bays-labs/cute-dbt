@@ -16,6 +16,7 @@ import {
   rawTargetForLine,
   spanForNode,
   inSpanCursor,
+  forwardSnapTarget,
   initialSyncState,
   selectNode,
   selectZone,
@@ -307,6 +308,134 @@ describe("anti-loop: forward→reverse→forward settles with zero extra renders
     expect(forward2.scrollNonce).toBe(initialSyncState().scrollNonce + 1);
   });
 
+  // ── shared-start nesting: forward→reverse→forward must STILL be a fixed point
+  //    that keeps the SELECTED node (cute-dbt#496 finding 2). An outer span whose
+  //    start line is also the start of a NESTED span (a wrapper/model span sharing
+  //    its first CTE's start) used to make forward snap the cursor onto a line that
+  //    reverse-resolved to the INNER node — flipping the selection away from the
+  //    node the user picked AND firing a second scroll. The forward snap now targets
+  //    a line that round-trips back to the selected node, so a single click on the
+  //    OUTER node settles on the outer node with exactly ONE scroll. ──────────────
+  it("a SHARED-START nested span does not flip the selection or double-scroll", () => {
+    // outer 5..20 with a nested inner 5..8 that SHARES the start line 5.
+    const nested: SyncMaps = {
+      nodeSpans: { outer: sp(5, 20), inner: sp(5, 8) },
+    };
+    // FORWARD: user clicks the OUTER node on the DAG.
+    const forward1 = syncForward(selectNode(initialSyncState(), "outer"), nested);
+    expect(forward1.node).toBe("outer");
+    // the snapped cursor must reverse-resolve back to "outer" (line 5 would resolve
+    // to the smaller "inner" — innermost-span-wins — so forward snaps past it).
+    expect(nodeForLine(nested, forward1.cursor)).toBe("outer");
+    expect(forward1.scrollNonce).toBe(initialSyncState().scrollNonce + 1);
+
+    // REVERSE on the snapped cursor: it resolves to "outer" (unchanged) → NO-OP (===).
+    const reverse = syncFromCursor(forward1, nested, forward1.cursor, "compiled");
+    expect(reverse).toBe(forward1); // selection NOT flipped to "inner"
+    expect(reverse.node).toBe("outer");
+
+    // FORWARD again → idempotent fixed point: still "outer", still ONE scroll.
+    const forward2 = syncForward(reverse, nested);
+    expect(forward2).toBe(reverse);
+    expect(forward2.node).toBe("outer");
+    expect(forward2.scrollNonce).toBe(initialSyncState().scrollNonce + 1);
+  });
+
+});
+
+// ── re-selection after a deselect / zone-switch must RE-SCROLL (cute-dbt#496
+//    finding 1). `lastScrolled` is the scroll-nonce anti-loop guard: it freezes
+//    re-scrolls while the SAME node stays selected. But clearing the selection
+//    (selectNode(null)) or replacing it with a zone (selectZone) must reset it, so
+//    a later RE-selection of the same node counts as fresh and scrolls back to it. ─
+describe("anti-loop: re-selecting a node after a deselect/zone-switch re-scrolls", () => {
+  it("deselect → re-select the SAME node bumps the scroll nonce again", () => {
+    // 1. select + forward → first scroll.
+    const s0 = syncForward(selectNode(initialSyncState(), "stg"), MAPS);
+    expect(s0.scrollNonce).toBe(initialSyncState().scrollNonce + 1);
+    expect(s0.lastScrolled).toBe("stg");
+    // 2. DESELECT — clearing the node must also clear lastScrolled.
+    const cleared = selectNode(s0, null);
+    expect(cleared.node).toBeNull();
+    expect(cleared.lastScrolled).toBeNull();
+    // 3. RE-SELECT the same node → forward must scroll AGAIN (genuine re-selection).
+    const s1 = syncForward(selectNode(cleared, "stg"), MAPS);
+    expect(s1.lastScrolled).toBe("stg");
+    expect(s1.scrollNonce).toBe(s0.scrollNonce + 1); // ← re-scroll happened
+  });
+
+  it("zone-switch → re-select the SAME node bumps the scroll nonce again", () => {
+    // 1. select + forward → first scroll.
+    const s0 = syncForward(selectNode(initialSyncState(), "stg"), MAPS);
+    // 2. pick a ZONE (mutual exclusion clears the node) → lastScrolled must reset.
+    const zoned = selectZone(s0, "zone:loop");
+    expect(zoned.node).toBeNull();
+    expect(zoned.zone).toBe("zone:loop");
+    expect(zoned.lastScrolled).toBeNull();
+    // 3. RE-SELECT the node → forward scrolls again.
+    const s1 = syncForward(selectNode(zoned, "stg"), MAPS);
+    expect(s1.scrollNonce).toBe(s0.scrollNonce + 1);
+  });
+
+  it("re-selecting a DIFFERENT node after deselect still scrolls (lastScrolled cleared)", () => {
+    const s0 = syncForward(selectNode(initialSyncState(), "stg"), MAPS);
+    const cleared = selectNode(s0, null);
+    const s1 = syncForward(selectNode(cleared, "final"), MAPS); // span 22..30
+    expect(s1.node).toBe("final");
+    expect(s1.scrollNonce).toBe(s0.scrollNonce + 1);
+    expect(s1.lastScrolled).toBe("final");
+  });
+
+  it("selectNode(null) on an already-cleared state is still an identity no-op", () => {
+    // the bail must survive the lastScrolled reset: clearing nothing changes nothing.
+    const s0 = initialSyncState(); // node null, lastScrolled null
+    expect(selectNode(s0, null)).toBe(s0); // ← identity preserved (no render)
+  });
+
+  it("selecting a node leaves a NON-null lastScrolled untouched (only clears reset it)", () => {
+    // selecting a real node must NOT clobber lastScrolled — only node→null resets it.
+    const s0 = syncForward(selectNode(initialSyncState(), "stg"), MAPS); // lastScrolled "stg"
+    const s1 = selectNode(s0, "final"); // switch to another node directly
+    expect(s1.lastScrolled).toBe("stg"); // carried forward (forward sync will re-scroll)
+  });
+});
+
+// ── forwardSnapTarget — the round-trip-stable forward snap line (cute-dbt#496
+//    finding 2). Reverse resolution stays innermost-span-wins; forward just picks
+//    a landing line that resolves BACK to the selected node so a shared-start nest
+//    can't flip the selection. These pin the resolver + the loop scan + the fallback. ─
+describe("forwardSnapTarget — the round-trip-stable forward snap line", () => {
+  it("returns the span START when the start resolves to this node (the common case)", () => {
+    // stg 5..20, stg_inner 8..12: line 5 resolves to stg (inner starts at 8) → start.
+    expect(forwardSnapTarget(MAPS, "stg", sp(5, 20))).toBe(5);
+  });
+  it("scans PAST a shared-start nested span to the first line that resolves to this node", () => {
+    // outer 5..20, inner 5..8 SHARE the start: line 5 resolves to inner (smaller),
+    // 6,7,8 also resolve to inner; the first line resolving to outer is 9.
+    const nested: SyncMaps = { nodeSpans: { outer: sp(5, 20), inner: sp(5, 8) } };
+    expect(forwardSnapTarget(nested, "outer", sp(5, 20))).toBe(9);
+    // and the inner node itself snaps to its own start (5, which resolves to inner).
+    expect(forwardSnapTarget(nested, "inner", sp(5, 8))).toBe(5);
+  });
+  it("the chosen line ALWAYS reverse-resolves to the selected node (round-trip invariant)", () => {
+    const nested: SyncMaps = { nodeSpans: { outer: sp(5, 20), inner: sp(5, 8) } };
+    const target = forwardSnapTarget(nested, "outer", sp(5, 20));
+    expect(nodeForLine(nested, target)).toBe("outer");
+  });
+  it("falls back to the span START when the span is WHOLLY shadowed (genuine ambiguity)", () => {
+    // outer 5..8 fully covered by an equal-or-smaller inner 5..8 that wins every line
+    // (tie → first key 'inner' wins). No line in outer's span resolves to outer →
+    // honest fallback to the start rather than fabricate a position.
+    const shadowed: SyncMaps = { nodeSpans: { inner: sp(5, 8), outer: sp(5, 8) } };
+    expect(forwardSnapTarget(shadowed, "outer", sp(5, 8))).toBe(5);
+  });
+  it("scans through to the END line when it is the ONLY resolving line (kills `<= end` → `< end`)", () => {
+    // tail 5..8 with a nested head 5..7 winning lines 5,6,7 → line 8 (the END) is the
+    // ONLY line resolving to tail. The real `line <= sp.end.line` reaches 8; a `<`
+    // mutant stops at 7, never matches, and falls back to the start (5) instead.
+    const tailNest: SyncMaps = { nodeSpans: { head: sp(5, 7), tail: sp(5, 8) } };
+    expect(forwardSnapTarget(tailNest, "tail", sp(5, 8))).toBe(8);
+  });
 });
 
 // ── MUTATION-KILL block: each assertion below pins a specific Stryker mutant on
@@ -417,6 +546,25 @@ describe("mutation-kill: selectNode / selectZone each conjunct of the bail matte
     expect(out.node).toBeNull();
     const other: SyncState = { ...initialSyncState(), zone: "z" };
     expect(selectZone(other, "z2")).not.toBe(other);
+  });
+  it("selectNode(null) RESETS a stale lastScrolled — the `lastScrolled === next` conjunct is load-bearing", () => {
+    // node already null, zone null, but lastScrolled pins a previously-scrolled node.
+    // Clearing must NOT bail: it must reset lastScrolled so a later re-select scrolls.
+    // The `s.lastScrolled === nextLastScrolled` → `true` mutant would bail and leave
+    // lastScrolled stale (re-selection then never re-scrolls — finding 1's bug).
+    const stale: SyncState = { node: null, zone: null, cursor: 7, scrollNonce: 1, lastScrolled: "stg" };
+    const out = selectNode(stale, null);
+    expect(out).not.toBe(stale); // did NOT bail
+    expect(out.lastScrolled).toBeNull(); // reset
+  });
+  it("selectZone RESETS a stale lastScrolled — the `lastScrolled === null` conjunct is load-bearing", () => {
+    // zone already selected (node null) but lastScrolled is stale. Re-selecting the
+    // SAME zone must reset lastScrolled (a later node re-select scrolls). The
+    // `s.lastScrolled === null` → `true` mutant would bail and leave it stale.
+    const stale: SyncState = { node: null, zone: "z", cursor: 0, scrollNonce: 1, lastScrolled: "stg" };
+    const out = selectZone(stale, "z");
+    expect(out).not.toBe(stale); // did NOT bail
+    expect(out.lastScrolled).toBeNull(); // reset
   });
 });
 

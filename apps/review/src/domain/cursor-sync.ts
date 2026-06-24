@@ -209,20 +209,35 @@ export function rawTargetForLine(maps: SyncMaps, line: number | null): RawTarget
 /**
  * selectNode — forward DAG→state: select `id` (or clear with null), CLEARING any
  * zone (mutual exclusion). Returns the SAME reference when the node is already
- * selected AND no zone is set — the functional-setState bail (no render).
+ * selected AND no zone is set AND no scroll guard needs resetting — the
+ * functional-setState bail (no render).
+ *
+ * CLEARING the node (`id === null`) also RESETS `lastScrolled` to null
+ * (cute-dbt#496 finding 1): `lastScrolled` is the scroll-nonce anti-loop guard —
+ * it freezes re-scrolls while the SAME node stays selected. If a deselect left it
+ * pinned to the just-cleared node, a later RE-selection of that same node would be
+ * (wrongly) treated as "already scrolled" and `syncForward` would NOT scroll back
+ * to it. Resetting it on clear makes a re-selection count as fresh. Selecting a
+ * real node leaves `lastScrolled` untouched (the forward sync owns the bump).
  */
 export function selectNode(s: SyncState, id: string | null): SyncState {
-  if (s.node === id && s.zone === null) return s; // true no-op → identity
-  return { ...s, node: id, zone: null };
+  const nextLastScrolled = id === null ? null : s.lastScrolled;
+  // true no-op → identity (nothing observable, including the scroll guard, changes)
+  if (s.node === id && s.zone === null && s.lastScrolled === nextLastScrolled) return s;
+  return { ...s, node: id, zone: null, lastScrolled: nextLastScrolled };
 }
 
 /**
  * selectZone — forward DAG→state: select a zone (or clear with null), CLEARING any
- * node (mutual exclusion). Same `===`-bail discipline as `selectNode`.
+ * node (mutual exclusion). Same `===`-bail discipline as `selectNode`. Selecting a
+ * zone forces the node to null, so it ALWAYS resets `lastScrolled` to null
+ * (cute-dbt#496 finding 1) — a later re-selection of the previously-scrolled node
+ * then counts as fresh and `syncForward` scrolls back to it.
  */
 export function selectZone(s: SyncState, id: string | null): SyncState {
-  if (s.zone === id && s.node === null) return s; // true no-op → identity
-  return { ...s, zone: id, node: null };
+  // node→null on every zone selection ⇒ lastScrolled always resets.
+  if (s.zone === id && s.node === null && s.lastScrolled === null) return s; // true no-op → identity
+  return { ...s, zone: id, node: null, lastScrolled: null };
 }
 
 /**
@@ -246,6 +261,37 @@ export function inSpanCursor(cursor: number | null, sp: LineSpan): number | null
 }
 
 /**
+ * forwardSnapTarget — the line `syncForward` snaps an out-of-span cursor to. The
+ * obvious target is the selected node's span START, and that is what it returns
+ * whenever the start reverse-resolves back to the SAME node (the common case).
+ *
+ * SHARED-START NESTING (cute-dbt#496 finding 2): when a NESTED (smaller) span shares
+ * the selected node's start line — a wrapper/model span whose first line is also its
+ * first CTE's start — `nodeForLine(start)` resolves to the INNER node (innermost-
+ * span-wins). Snapping the cursor there would make the reverse sync flip the
+ * selection to the inner node AND fire a second scroll, breaking the AC#3
+ * fixed-point/zero-extra-render guarantee. So when the start is shadowed, scan the
+ * span for the FIRST line that reverse-resolves to the selected node, keeping
+ * forward→reverse a true fixed point. If NO line in the span resolves to the node
+ * (it is wholly shadowed by nested spans — a degenerate/ambiguous shape), fall back
+ * to the span start honestly rather than fabricate a position. Reverse resolution
+ * (innermost-span-wins) is UNCHANGED — only forward's landing line is made
+ * round-trip-stable.
+ */
+export function forwardSnapTarget(maps: SyncMaps, node: string, sp: LineSpan): number {
+  // tracked: cute-dbt#517 — equivalent: this early return is a clarity/perf
+  // short-circuit for the common case. The loop below starts at `sp.start.line`, so
+  // when the start resolves to `node` the loop's FIRST iteration returns it too —
+  // dropping this guard yields the identical result. Not an observable branch.
+  // Stryker disable next-line ConditionalExpression
+  if (nodeForLine(maps, sp.start.line) === node) return sp.start.line;
+  for (let line = sp.start.line; line <= sp.end.line; line++) {
+    if (nodeForLine(maps, line) === node) return line;
+  }
+  return sp.start.line; // wholly shadowed → honest fallback (genuine ambiguity)
+}
+
+/**
  * syncForward — the forward sync (DAG node → code cursor + scroll), the prototype's
  * guarded effect (topology.js §"forward sync: a CTE node was picked"). For the
  * CURRENTLY-selected node:
@@ -253,7 +299,9 @@ export function inSpanCursor(cursor: number | null, sp: LineSpan): number | null
  *     honest NO-OP (same reference; never moves the cursor, never scrolls);
  *   • move the cursor INTO the node's span ONLY when it is outside it (the
  *     `c >= start && c <= end ? c : start` functional bail — an in-span cursor is
- *     preserved so a reverse-driven cursor isn't yanked to the span top);
+ *     preserved so a reverse-driven cursor isn't yanked to the span top); the snap
+ *     target is the first line that reverse-resolves to the node (`forwardSnapTarget`),
+ *     so a shared-start nested span can't flip the selection on the reverse half;
  *   • bump the scroll nonce ONLY when the node differs from `lastScrolled` (the
  *     `lastScrolledRef` guard) — re-running with the same node is idempotent.
  * The whole transition collapses to `===` when nothing changed (anti-loop).
@@ -267,12 +315,13 @@ export function syncForward(s: SyncState, maps: SyncMaps): SyncState {
   const sp = spanForNode(maps, s.node);
   if (!sp) return s; // no compiled span (incremental-only) → honest no-op
   // The cursor stays put only when it is INSIDE the node's span; otherwise it snaps
-  // to the span start (the prototype's `c >= start && c <= end ? c : start` bail).
+  // to a span line that reverse-resolves to THIS node (the prototype's
+  // `c >= start && c <= end ? c : start` bail, hardened against shared-start nesting).
   // `inSpanCursor` returns the in-span cursor or null, isolating the `<= end`
   // boundary mutant (killed by a real "cursor past end snaps back" test) from the
   // `>= start` equivalent it suppresses internally.
   const kept = inSpanCursor(s.cursor, sp);
-  const nextCursor = kept ?? sp.start.line;
+  const nextCursor = kept ?? forwardSnapTarget(maps, s.node, sp);
   const fresh = s.lastScrolled !== s.node;
   if (nextCursor === s.cursor && !fresh) return s; // cursor unchanged + already scrolled → identity
   return {
