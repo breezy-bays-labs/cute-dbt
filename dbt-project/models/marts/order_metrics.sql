@@ -175,6 +175,16 @@ final as (
             then round(all_statuses.amount / all_statuses.all_orders_amount, 4)
             else 0
         end as amount_share,
+        -- cute-dbt live-dogfood: a DIRECT var() reference so the
+        -- Project-definition vars row carries a direct-tier line and
+        -- order_metrics gets a "reads var 'dq_threshold' · direct" chip.
+        case
+            when all_statuses.all_orders_amount > 0
+                 and round(all_statuses.amount / all_statuses.all_orders_amount, 4)
+                     >= {{ var('dq_threshold') }}
+            then 1
+            else 0
+        end as meets_dq_threshold,
         (select count(*) from status_dim) as distinct_status_count
     from all_statuses
 )

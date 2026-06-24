@@ -1,5 +1,5 @@
 id,order_id,payment_method,amount
-1,1,credit_card,1000
+1,1,credit_card,1200
 2,2,credit_card,2000
 3,3,coupon,100
 4,4,coupon,2500
@@ -111,4 +111,4 @@ id,order_id,payment_method,amount
 110,96,gift_card,1700
 111,97,bank_transfer,1400
 112,98,bank_transfer,1000
-113,99,credit_card,2400
+113,99,credit_card,

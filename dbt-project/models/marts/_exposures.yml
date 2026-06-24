@@ -1,0 +1,21 @@
+version: 2
+
+# cute-dbt live-dogfood — GOVERNANCE blast-radius: an exposure that
+# depends_on an in-scope model (order_metrics). The Governance lens
+# reverse-reachability walk then renders "Touches N in-scope models feeding
+# <exposure>, owner …" (gov-blast). Editing this file (or its referenced
+# model) brings the blast-radius statement into the live preview.
+exposures:
+  - name: revenue_dashboard
+    label: Revenue dashboard
+    type: dashboard
+    maturity: high
+    url: https://example.test/dashboards/revenue
+    description: >
+      Executive revenue dashboard fed by order_metrics — the downstream
+      consumer whose blast radius the Governance lens surfaces.
+    depends_on:
+      - ref('order_metrics')
+    owner:
+      name: Analytics Eng
+      email: analytics-eng@example.test

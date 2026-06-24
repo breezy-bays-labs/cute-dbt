@@ -21,12 +21,20 @@ orders as (
 final as (
     select
         customers.customer_id,
-        customers.first_name,
-        customers.last_name,
+        -- cute-dbt live-dogfood: mask the projected PII name columns via the
+        -- new mask_pii() macro — a second macro caller (so the Macros lens
+        -- impacted-model directory is non-trivial). This is a BODY-ONLY axis
+        -- model (no schema.yml edit, no unit test), so the Models lens shows
+        -- a lone [Body] chip here.
+        {{ mask_pii('customers.first_name') }} as first_name,
+        {{ mask_pii('customers.last_name') }} as last_name,
         -- always NULL on the kept rows; projected so the GENERAL
         -- left-null check's trigger provably fires and is visibly
         -- superseded by join.anti-join (cute-dbt#173).
-        orders.customer_id as matched_customer_id
+        orders.customer_id as matched_customer_id,
+        -- cute-dbt live-dogfood body change: a snapshot timestamp marker so
+        -- this model is unambiguously body-modified in the PR diff.
+        current_date as snapshot_date
     from customers
     left join orders
         on customers.customer_id = orders.customer_id

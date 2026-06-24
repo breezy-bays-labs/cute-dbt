@@ -1,7 +1,9 @@
 name: 'jaffle_shop'
 
 config-version: 2
-version: '0.1'
+# cute-dbt live-dogfood — IDENTITY category: bump the project version so the
+# Project-definition panel renders an identity-change row.
+version: '0.2'
 
 profile: 'jaffle_shop'
 
@@ -19,11 +21,31 @@ clean-targets:
 
 require-dbt-version: [">=1.11.0", "<3.0.0"]
 
+# cute-dbt live-dogfood — VARS category: two project vars. dq_threshold is
+# referenced via {{ var('dq_threshold') }} inside order_metrics.sql's final
+# CASE, so the vars row carries a DIRECT-tier line + order_metrics gets a
+# "reads var 'dq_threshold' · direct" config-attribution chip (a var with no
+# model reference would render an empty tier — silently dropped).
+vars:
+  dq_threshold: 0.95
+  refund_window_days: 30
+
 models:
   jaffle_shop:
     +materialized: table
     staging:
       +materialized: view
+    # cute-dbt live-dogfood — CONFIG-TREE (scope-widening) category: a fresh
+    # `marts.+tags` key the marts subtree introduces. It widens EVERY marts
+    # model (incl. body-unchanged ones) into scope (TOTAL tier) and gives
+    # each a "+tags via dbt_project.yml · models.jaffle_shop.marts"
+    # config-attribution chip — the config-tree provenance showcase. (Note:
+    # the marts models already carry config:true from their shared
+    # _marts__models.yml patch_path being in the diff — the shared-schema-file
+    # reality — so the clean single-axis demo uses the staging models for
+    # [Config] and `orders` for [Unit test]; see the PR body 3-axis note.)
+    marts:
+      +tags: ['marts']
 
 # cute-dbt#269 — live dogfood for the project-change panel's hooks +
 # dispatch rows: these materialize as operation.* nodes in the compiled
@@ -32,9 +54,28 @@ models:
 # "./"-prefixed twins — cute-dbt ingests both), so the sticky pr-diff
 # preview exercises the operation-node SQL diff whenever a PR edits
 # them.
+# cute-dbt live-dogfood — HOOKS category: edit on-run-start + add on-run-end
+# so the operation.* nodes byte-match and the hook-slot SQL diff fills.
 on-run-start:
   - "create schema if not exists analytics_audit"
+  - "create schema if not exists analytics_audit_v2"
+on-run-end:
+  - "create schema if not exists analytics_audit_archive"
 
+# cute-dbt live-dogfood — DISPATCH category: extend the search_order so the
+# Project-definition panel renders a dispatch-change row.
 dispatch:
   - macro_namespace: dbt
-    search_order: ["jaffle_shop", "dbt"]
+    search_order: ["jaffle_shop", "dbt_utils", "dbt"]
+
+# cute-dbt live-dogfood — SEEDS config (#397 chips). quote_columns +
+# column_types need no CSV reformat; do NOT set +delimiter (comma is the
+# suppressed default). Pairs with the raw_payments.csv cell edits so the
+# seed is scoped AND carries config chips.
+seeds:
+  jaffle_shop:
+    raw_payments:
+      +quote_columns: true
+      +column_types:
+        payment_method: varchar(20)
+        amount: integer
