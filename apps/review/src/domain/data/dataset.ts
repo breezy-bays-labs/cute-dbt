@@ -15,6 +15,7 @@ import type {
   GivenPayload, ModelPayload, ModelState, PrDagPayload, PrDagView, RenderedThread,
   SeedCard, TestPayload,
 } from "../context-data";
+import type { ChangeState, GraphData, GraphNode, Materialization, NodeKind } from "../graph-model";
 import { adaptDiffTable, allAdded, cellSide, type NormDiffTable } from "./cell-diff";
 import { buildColEdges, buildColLineage, colTerminal, type ColEdge, type ColSource } from "./col-lineage";
 import { buildRawSpans, ensureMainNode, rawDagToGraph, type LineSpan, type RawGraph } from "./raw-spans";
@@ -97,6 +98,48 @@ export interface ScopeNode {
   change: string; context: boolean; mat: string | null;
 }
 export interface PrScope { data: { nodes: ScopeNode[]; edges: [string, string][] }; selectable: string[]; counts: Record<string, number> }
+
+/** The 3-axis toggle vocabulary (single-select): the whole scope + the three
+ *  per-axis subgraphs. `all` is always present; the axis arms are present only
+ *  when the spine emitted `pr_dag.by_axis`. */
+export type ScopeAxis = "all" | "body" | "config" | "unit_test";
+export const SCOPE_AXES: ScopeAxis[] = ["all", "body", "config", "unit_test"];
+
+/** Pick a PR-scope subgraph by axis from a per-axis map, degrading to `all` when
+ *  the requested axis is absent (the spine emitted no `by_axis` for it). Pure +
+ *  honest: never fabricates a subgraph, never returns a stale axis. */
+export function pickScopeAxis(
+  byAxis: Record<string, PrScope | null>,
+  axis: ScopeAxis,
+): PrScope | null {
+  return byAxis[axis] ?? byAxis.all ?? null;
+}
+
+/** The axes actually present in a per-axis map (for a stable toggle — never
+ *  offer an axis the spine didn't emit). `all` always leads when present. */
+export function availableScopeAxes(byAxis: Record<string, PrScope | null>): ScopeAxis[] {
+  return SCOPE_AXES.filter((a) => byAxis[a]);
+}
+
+/** Normalize a ScopeNode's `mat` string onto the engine's Materialization glyph
+ *  vocabulary; an unrecognized/absent value is honest-null (no false glyph). */
+function normMat(mat: string | null): Materialization {
+  return mat === "view" || mat === "table" || mat === "incremental" ? mat : null;
+}
+
+/** Adapt the PR-scope subgraph (ScopeNode POD) onto the shared engine GraphData.
+ *  Pure: the change/kind/context honesty facts are carried VERBATIM from the
+ *  scope node (computed in prDagToScope), never recomputed here. */
+export function scopeToGraph(scope: PrScope["data"] | null | undefined): GraphData {
+  if (!scope) return { nodes: [], edges: [] };
+  const nodes: GraphNode[] = scope.nodes.map((n) => ({
+    id: n.id, label: n.label, sub: n.sub, tone: n.tone,
+    kind: n.kind as NodeKind, change: n.change as ChangeState,
+    context: n.context, mat: normMat(n.mat),
+  }));
+  const edges: GraphData["edges"] = scope.edges.map(([s, t]) => [s, t]);
+  return { nodes, edges };
+}
 export function prDagToScope(
   prDag: PrDagView | null | undefined,
   modelSchema: Record<string, string>,

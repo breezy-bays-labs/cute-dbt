@@ -13,6 +13,7 @@ import { useAppStore } from "../data/store";
 import { useKeydown } from "../data/use-keydown";
 import { deriveView } from "../data/nav-slice";
 import { buildContexts } from "../domain/reshape";
+import { buildDataset, type ScopeAxis } from "../domain/data/dataset";
 import { shikiName, ensureHighlighter, type AppTheme } from "../domain/highlighter";
 import type { ContextData } from "../domain/context-data";
 import { ENTITY_NOUN } from "../domain/matrix";
@@ -35,6 +36,7 @@ function changeTone(state?: string): "added" | "modified" | "removed" | null {
 export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): React.ReactElement {
   const context = useMemo(() => loadFixture("context.440") as unknown as ContextData, []);
   const contexts = useMemo(() => buildContexts(context), [context]);
+  const dataset = useMemo(() => buildDataset(context), [context]);
 
   // ── store subscriptions (the chrome owns them) ───────────────────────────
   const entity = useAppStore((s) => s.entity);
@@ -43,9 +45,11 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   const overlays = useAppStore((s) => s.overlays);
   const settings = useAppStore((s) => s.settings);
   const keymapOverride = useAppStore((s) => s.keymapOverride);
+  const prNode = useAppStore((s) => s.prNode);
   const setEntity = useAppStore((s) => s.setEntity);
   const setView = useAppStore((s) => s.setView);
   const setSel = useAppStore((s) => s.setSel);
+  const setPrNode = useAppStore((s) => s.setPrNode);
   const toggleOverlay = useAppStore((s) => s.toggleOverlay);
   const openOverlay = useAppStore((s) => s.openOverlay);
   const setSetting = useAppStore((s) => s.setSetting);
@@ -61,6 +65,8 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   // ── per-surface ui local state (lands in slices in later slices) ──────────
   const [codeMode, setCodeMode] = useState<"diff" | "file">("diff");
   const [dataMode, setDataMode] = useState<"diff" | "file">("diff");
+  // the PR-scope change-axis (single-select; lands in a slice in a later slice).
+  const [scopeAxis, setScopeAxis] = useState<ScopeAxis>("all");
 
   const [themeError, setThemeError] = useState<string | null>(null);
 
@@ -221,6 +227,16 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
             compiledSql={compiledSql}
             shiki={shiki}
             sel={sel[entity]}
+            prScopeByAxis={dataset.prScopeByAxis}
+            scopeAxis={scopeAxis}
+            onScopeAxis={setScopeAxis}
+            prNode={prNode}
+            onPrNode={setPrNode}
+            onOpenModel={(id) => {
+              // route OUT: a seed/macro/deleted PR node jumps into the Models entity.
+              setEntity("models" as Entity);
+              setSel(id, "models" as Entity);
+            }}
           />
         </main>
       </div>

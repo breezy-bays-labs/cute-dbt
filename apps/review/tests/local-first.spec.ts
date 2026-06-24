@@ -188,6 +188,79 @@ test("an open overlay OWNS the keyboard (modal gate suppresses entity keys)", as
   await expect(page.locator('[data-testid="tab-macros"]')).toHaveAttribute("data-active", "false");
 });
 
+test("S4 DAG engine: PR-scope lineage renders via the elkjs worker (real layout, local-first) + the 3-axis toggle swaps the subgraph + the prNode nav split holds", async ({ page }) => {
+  const external = await denyExternalNetwork(page);
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (e) => consoleErrors.push("PAGEERROR: " + e.message));
+
+  await page.goto("/index.html", { waitUntil: "networkidle" });
+  await page.waitForSelector('[data-testid="entity-tabs"]');
+
+  // The Models default model is selected — capture it to prove the nav split later.
+  await page.waitForSelector('[data-testid="model-list-item"]');
+  const selectedBefore = await page
+    .locator('[data-testid="model-list-item"][data-selected="true"]')
+    .getAttribute("data-model");
+
+  // Navigate to PR → Topology (entity key "1", then the Topology view tab).
+  await page.keyboard.press("1");
+  await page.locator('[data-testid="tab-lineage"]').click();
+  await page.waitForSelector('[data-testid="pr-scope-lineage"]');
+  await page.waitForSelector('[data-testid="graph-node"]');
+
+  // ── the engine rendered through the custom node + custom edge pipeline ─────
+  const nodeCount = await page.locator('[data-testid="graph-node"]').count();
+  expect(nodeCount, "PR-scope nodes rendered").toBeGreaterThan(1);
+  await expect(page.locator('[data-testid="confidence-edge"]').first()).toBeAttached();
+
+  // ── the elkjs worker produced DISTINCT geometry (real layered layout) ──────
+  // Wait until the layered worker result lands (nodes spread across >1 x AND >1 y).
+  await expect
+    .poll(async () => {
+      const pts = await page.$$eval(".react-flow__node", (nodes) =>
+        nodes.map((n) => {
+          const t = getComputedStyle(n).transform;
+          const m = /matrix\(([^)]+)\)/.exec(t);
+          if (!m || !m[1]) return [0, 0] as [number, number];
+          const p = m[1].split(",").map((s) => parseFloat(s.trim()));
+          return [p[4] ?? 0, p[5] ?? 0] as [number, number];
+        }),
+      );
+      const xs = new Set(pts.map((p) => Math.round(p[0])));
+      const ys = new Set(pts.map((p) => Math.round(p[1])));
+      return Math.min(xs.size, ys.size);
+    }, { timeout: 8000 })
+    .toBeGreaterThan(1);
+
+  // ── the 3-axis toggle swaps the rendered subgraph ─────────────────────────
+  await expect(page.locator('[data-testid="axis-option"][data-axis="all"]')).toHaveAttribute("data-active", "true");
+  const allNodes = await page.locator('[data-testid="graph-node"]').count();
+  await page.locator('[data-testid="axis-option"][data-axis="unit_test"]').click();
+  await expect(page.locator('[data-testid="axis-option"][data-axis="unit_test"]')).toHaveAttribute("data-active", "true");
+  // the fixture's unit_test axis carries a different node count than `all`.
+  await expect.poll(async () => page.locator('[data-testid="graph-node"]').count(), { timeout: 5000 }).not.toBe(allNodes);
+
+  // ── the prNode-vs-sel.models NAV SPLIT: clicking a model PR node sets prNode
+  //    (the persisted PR cursor) WITHOUT changing the Models-entity selection ──
+  await page.locator('[data-testid="axis-option"][data-axis="all"]').click();
+  const modelNode = page.locator('[data-testid="graph-node"][data-kind="model"]').first();
+  const clickedName = await modelNode.getAttribute("data-change"); // present iff a PR node
+  expect(clickedName).not.toBeNull();
+  await modelNode.click();
+  await expect(modelNode).toHaveAttribute("data-selected", "true");
+  // the Models-entity selection is UNTOUCHED (the split): go back to Models.
+  await page.keyboard.press("2");
+  await page.waitForSelector('[data-testid="model-list-item"]');
+  const selectedAfter = await page
+    .locator('[data-testid="model-list-item"][data-selected="true"]')
+    .getAttribute("data-model");
+  expect(selectedAfter, "clicking a PR node must NOT change the Models selection").toBe(selectedBefore);
+
+  // ── zero external requests, zero page errors (local-first held throughout) ──
+  expect(external, `external requests: ${external.join(", ")}`).toEqual([]);
+  expect(consoleErrors, `page errors: ${consoleErrors.join(" | ")}`).toEqual([]);
+});
+
 test("unregistered theme fails loudly (no silent github-dark fallback)", async ({ page }) => {
   const external = await denyExternalNetwork(page);
   const pageErrors: string[] = [];
