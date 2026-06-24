@@ -801,6 +801,81 @@ fn context_out_equal_to_out_is_a_usage_error() {
     );
 }
 
+#[test]
+fn context_out_equal_to_findings_out_is_a_usage_error_before_any_write() {
+    // gemini on PR #504 — the sidecar-vs-sidecar pair: `--findings-out X
+    // --context-out X` would clobber the findings envelope with the context
+    // envelope on an otherwise-successful run. `--out` is distinct, so this
+    // collision is only caught by the generalized pairwise check. Rejected
+    // as a usage error (exit 2) BEFORE any artifact is written.
+    let html = tmp("sidecar_collision.html");
+    let sidecar = tmp("sidecar_collision.json");
+    clear(&html);
+    clear(&sidecar);
+    let output = run(&[
+        "report",
+        "--manifest",
+        s(&fixture("jaffle-shop-current.json")),
+        "--baseline-manifest",
+        s(&fixture("jaffle-shop-baseline.json")),
+        "--out",
+        s(&html),
+        "--findings-out",
+        s(&sidecar),
+        "--context-out",
+        s(&sidecar),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "--context-out == --findings-out is a usage error: {output:?}"
+    );
+    assert!(
+        !html.exists() && !sidecar.exists(),
+        "the collision is rejected before any artifact is written"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--findings-out") && stderr.contains("--context-out"),
+        "the conflict message names both sidecar flags: {stderr}"
+    );
+}
+
+#[test]
+fn an_unwritable_context_out_path_is_reported() {
+    // The --context-out twin of `an_unwritable_findings_out_path_is_reported`:
+    // a context path under a directory that does not exist makes
+    // `write_context_artifact` fail, so the run loop reports the write error
+    // (exit 1) instead of swallowing it or panicking. Without this test a
+    // future `let _ = write_context_artifact(...)` would silently regress the
+    // surfaced-error contract. The HTML --out path IS writable here, so the
+    // failure is specifically the context artifact's.
+    let html = tmp("context_unwritable.html");
+    let context = tmp("no_such_dir/context.json");
+    clear(&html);
+    let output = run(&[
+        "report",
+        "--manifest",
+        s(&fixture("jaffle-shop-current.json")),
+        "--baseline-manifest",
+        s(&fixture("jaffle-shop-baseline.json")),
+        "--out",
+        s(&html),
+        "--context-out",
+        s(&context),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "an unwritable context-out path exits 1: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not write"),
+        "stderr reports the context-write failure: {stderr}"
+    );
+}
+
 // ===== cute-dbt#393 — finding→line anchors + GitHub annotations =========
 
 #[test]
