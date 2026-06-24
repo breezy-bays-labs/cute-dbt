@@ -124,9 +124,17 @@ export function inThreads(c: KbContext): boolean {
 // HONESTLY: greyed when the when-context isn't met (never a false claim that the
 // motion works). Handlers wire in later slices; here they are REGISTERED.
 
-/** mark-reviewed-advance + next/prev-unreviewed live on a reviewable instance. */
+/**
+ * mark-reviewed-advance + next/prev-unreviewed live on a reviewable instance —
+ * AND only once the review flow is actually mounted (`inReview`). Gating on the
+ * surface family alone (entity/view) would mark these flow actions active before
+ * any reviewable surface exists, contradicting the declared flow contract (the
+ * handlers land in S2/V1 and rely on the flow being present). The flow signal
+ * `inReview` degrades honestly: until a slice feeds it, these actions read
+ * inactive (greyed in the footer) rather than falsely claiming the motion works.
+ */
 export function isReviewable(c: KbContext): boolean {
-  return c.entity !== "pr" || c.view === "files";
+  return (c.entity !== "pr" || c.view === "files") && c.inReview === true;
 }
 
 /** next/prev-unreviewed additionally need an unreviewed instance to advance to. */
@@ -380,12 +388,20 @@ export interface ParsedToken {
 export function parseToken(tok: string): ParsedToken {
   const mods = new Set<ModKey>();
   let s = String(tok);
-  (["meta", "alt", "ctrl"] as const).forEach((m) => {
-    if (s.startsWith(m + "+")) {
-      mods.add(m);
-      s = s.slice(m.length + 1);
+  // Strip modifier prefixes order-INDEPENDENTLY: loop until no `<mod>+` prefix
+  // remains, so a token listing modifiers in any order ("ctrl+alt+d" as well as
+  // "alt+ctrl+d") parses identically. A single fixed-order pass would leave a
+  // trailing modifier glued to the base key when the orders disagree.
+  for (let matched = true; matched; ) {
+    matched = false;
+    for (const m of ["meta", "alt", "ctrl"] as const) {
+      if (s.startsWith(m + "+")) {
+        mods.add(m);
+        s = s.slice(m.length + 1);
+        matched = true;
+      }
     }
-  });
+  }
   if (UNSHIFT[s] != null) {
     mods.add("shift");
     return { mods, base: UNSHIFT[s] as string, glyph: s };
@@ -447,9 +463,37 @@ export interface Conflict {
 }
 
 /**
+ * The CANONICAL key identity of a stored token: `layer|base`, where `base` is
+ * the physical key under the modifier layer and `layer` is the shift/meta/alt/
+ * ctrl chord. This is the identity the WHOLE keyboard model compares against —
+ * `findConflicts` (two actions on the same canonical key in one active context)
+ * AND `makeCanonicalizer` (a physical keystroke → the canonical key the handlers
+ * expect) both derive from it, so the two can never disagree.
+ *
+ * The shift layer is part of the identity: `"n"` (base `n`, no mods) and `"N"`
+ * (base `n`, shift) are DISTINCT canonical keys — exactly what the uppercase
+ * shift-layer glyph tokens (`N`/`B`/`C`/`O`/`R`) rely on. A naive case-fold to
+ * lowercase would collapse `N` onto `n`, silently colliding `next-unreviewed`
+ * with `inst-next` (and `comments-hidden`/`prev-open-thread`/… with their
+ * lowercase twins) in the alias table — a real runtime dispatch bug that a
+ * raw-token compare cannot see. Comparing canonical keys is the SSOT soundness
+ * guarantee the slice exists to provide.
+ */
+export function canonicalKey(token: string): string {
+  const p = parseToken(token);
+  return layerKey(p.mods) + "|" + p.base;
+}
+
+/**
  * Every (layer, base) holding 2+ actions → a conflict — UNLESS scoped to an
  * active set, in which case cross-context reuse (one keyboard, many screens) is
  * fine and only two actions live in the SAME context count as a conflict.
+ *
+ * Conflict identity is the CANONICAL key (via `layerBindings`, which keys by
+ * `parseToken`'s `(layer, base)`) — so a shift-layer binding (`N`) and its
+ * lowercase twin (`n`) are correctly treated as distinct, while two RAW tokens
+ * that fold to the SAME canonical key (e.g. a rebind onto `D` where `d` is also
+ * bound, both base `d` no-mods) ARE reported even though the raw tokens differ.
  */
 export function findConflicts(keymap?: Keymap | null, activeSet?: ReadonlySet<string>): Conflict[] {
   const byLayer = layerBindings(keymap);
@@ -568,15 +612,33 @@ export function footerHints(ctx: KbContext, keymap?: Keymap | null): FooterChip[
 const DEAD = "\u0000dead"; // a token nothing in the app compares against
 export { DEAD };
 
-/** single-char alpha keys compare case-insensitively; everything else verbatim. */
+/**
+ * Normalize a key/token to its CANONICAL identity for alias + shadow lookup —
+ * `canonicalKey` (`layer|base`). Case-SENSITIVE by construction: an uppercase
+ * letter / shifted glyph parses onto the shift layer, so `"N"` and `"n"` map to
+ * DISTINCT identities. A previous version case-folded single chars to lowercase,
+ * which collapsed the shift-layer glyph tokens (`N`/`B`/`C`/`O`) onto their
+ * lowercase twins (`inst-next`/`inst-prev`/`comments-only`/…) in the alias table
+ * — a silent runtime collision the layer-keyed `findConflicts` couldn't see.
+ * Sharing `canonicalKey` keeps the canonicalizer and the conflict check in
+ * lockstep on ONE notion of key identity.
+ */
 function norm(key: string): string {
-  return key && key.length === 1 ? key.toLowerCase() : key;
+  return canonicalKey(key);
 }
 
 /**
  * Build the physical→canonical alias translator for a (possibly customized)
  * keymap. Pressing a bound key yields its action's canonical key; a default key
  * whose action has moved away is shadowed to DEAD so it stops firing.
+ *
+ * Identity is the CANONICAL key (`layer|base`, shift-aware), so a physical
+ * `Shift+N` (`eventKey === "N"`) resolves through its own slot and never
+ * collides with a bare `n`. The returned function takes the raw `eventKey` (the
+ * DOM `KeyboardEvent.key`, already the uppercase/shift glyph for a shifted key)
+ * and returns the action's canonical default TOKEN the handlers compare against
+ * (`"N"`, `"d"`, `"?"`, …), or DEAD for a shadowed default, or the raw key
+ * unchanged when nothing is bound there.
  */
 export function makeCanonicalizer(keymap?: Keymap | null): (eventKey: string) => string {
   const defs = defaultKeymap();
@@ -612,22 +674,63 @@ export interface CapturableKey {
 }
 
 /**
+ * Modifier-only keys — a bare press of one of these never produces a token.
+ */
+const MODIFIER_KEYS: readonly string[] = ["Shift", "Control", "Alt", "Meta", "CapsLock", "Dead", "Process"];
+
+/**
+ * Reserved keys that are never user-rebindable, regardless of how a rebind is
+ * attempted (the remap UI's `captureKey`, OR a programmatic / persisted override
+ * that bypasses the UI). This is the SINGLE source the `captureKey` deny path AND
+ * the `DENY_REBIND_KEYS` set below both derive from, so they cannot drift:
+ *   • whitespace/commit keys (`Space`/`Enter`/`Tab`) — the `fixed:true` actions;
+ *   • overlay/edit-control keys (`Escape`/`Backspace`/`Delete`);
+ *   • the directional cluster (`ArrowLeft/Right/Up/Down`) — motion stays fixed.
+ * `captureKey` rejects them at the keyboard; `DENY_REBIND_KEYS` rejects them at
+ * the store (write-time AND hydration sanitize), closing the bypass the narrower
+ * fixed-only list left open.
+ */
+export const RESERVED_KEYS: readonly string[] = [
+  " ",
+  "Spacebar",
+  "Enter",
+  "Tab",
+  "Escape",
+  "Backspace",
+  "Delete",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "ArrowDown",
+];
+
+/**
  * Capture a keydown into a storable token (the remap "press a key" UI). Returns
- * null for modifier-only / disallowed keys. The deny-list is the fixed:true
- * actions' keys + FIXED_KEYS (space/enter/tab/esc/arrows/backspace/delete) +
- * modifier chords (not bindable yet).
+ * null for modifier-only / disallowed keys. The deny-list is the reserved keys
+ * (Space/Enter/Tab/Esc/Backspace/Delete/arrows) + modifier chords (not bindable
+ * yet). Letter case is PRESERVED so a user can rebind onto a shift-layer letter
+ * (e.g. `Shift+N` → token `"N"`); case-folding here would make every shift-layer
+ * action (`N`/`B`/`C`/`O`/`R`) un-rebindable by collapsing the shifted letter
+ * onto its already-bound lowercase twin.
  */
 export function captureKey(e: CapturableKey): string | null {
   const k = e.key;
-  if (["Shift", "Control", "Alt", "Meta", "CapsLock", "Dead", "Process"].includes(k)) return null;
-  if (k === " " || k === "Spacebar" || k === "Escape" || k === "Tab" || k === "Enter" || k === "Backspace" || k === "Delete") return null; // reserved
-  if (k.startsWith("Arrow")) return null; // directional keys stay fixed
+  if (MODIFIER_KEYS.includes(k)) return null;
+  if (RESERVED_KEYS.includes(k)) return null; // reserved (incl. arrows)
   if (e.metaKey || e.ctrlKey || e.altKey) return null; // ⌘/⌃/⌥ chords not bindable yet
   if (k.length !== 1) return null; // single printable char only
-  return /[a-z]/i.test(k) ? k.toLowerCase() : k; // letters case-insensitive
+  return k; // case-preserving — shift-layer letters stay distinct
 }
 
-/** The set of canonical keys that are NOT user-rebindable (the captureKey deny-list). */
-export const DENY_REBIND_KEYS: ReadonlySet<string> = new Set(
-  ALL_ACTIONS.filter((a) => a.fixed).map((a) => a.def),
-);
+/**
+ * The set of key TOKENS that are NOT user-rebindable — enforced at every write
+ * path (the `rebindAction` store action AND the persisted-override hydration
+ * sanitize). It unions the `fixed:true` action defaults with the reserved
+ * non-action keys (`RESERVED_KEYS`), so a programmatic or stale-blob override
+ * can never reintroduce a reserved binding (`Tab`, `Space`, an arrow, …) that
+ * the `captureKey` UI would have refused.
+ */
+export const DENY_REBIND_KEYS: ReadonlySet<string> = new Set<string>([
+  ...ALL_ACTIONS.filter((a) => a.fixed).map((a) => a.def),
+  ...RESERVED_KEYS,
+]);

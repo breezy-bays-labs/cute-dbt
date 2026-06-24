@@ -25,7 +25,9 @@ import {
   actionLabel,
   parseToken,
   layerBindings,
+  canonicalKey,
   DENY_REBIND_KEYS,
+  RESERVED_KEYS,
   DEAD,
   isTopoShelf,
   isCodeDiff,
@@ -53,12 +55,17 @@ const AVAIL: Record<Entity, string[]> = {
  * Build a KbContext for every (entity, view, codeMode?) the app can be in,
  * EXHAUSTIVELY enumerated over the flow-signal boolean axes the flow actions
  * gate on. The earlier cube fixed those booleans at undefined, so it never
- * visited the cells where the flow actions (next/prev-unreviewed,
- * resolve-from-keyboard) become active — the very cells where a key conflict on
- * a flow action would show up. Enumerating `hasOpenThread` × `hasUnreviewed`
- * (the two flow-signal booleans the when-predicates read) makes the cube
- * genuinely cover every active-context cell, so the conflict-free guarantee
- * (findConflicts is empty for every cell) is sound, not vacuously true.
+ * visited the cells where the flow actions (mark-reviewed-advance,
+ * next/prev-unreviewed, resolve) become active — the very cells where a key
+ * conflict on a flow action would show up. Enumerating
+ * `inReview` × `hasOpenThread` × `hasUnreviewed` (the three flow-signal booleans
+ * the when-predicates read) makes the cube genuinely cover every active-context
+ * cell, so the conflict-free guarantee (findConflicts is empty for every cell,
+ * AND no two active actions share a CANONICAL key) is sound, not vacuously true.
+ * `inReview` is load-bearing: `isReviewable` now gates on it, so without the
+ * `inReview:true` cells the reviewable flow actions would never light up and the
+ * canonical-key guarantee would never exercise the `n`/`N` (shift-layer)
+ * distinction.
  */
 function buildCube(): KbContext[] {
   const out: KbContext[] = [];
@@ -70,13 +77,15 @@ function buildCube(): KbContext[] {
       // code surfaces additionally vary codeMode (diff | file)
       const codeModes = view === "code" ? (["diff", "file"] as const) : ([undefined] as const);
       codeModes.forEach((codeMode) => {
-        // flow-signal axes: hasOpenThread (drives resolve-from-keyboard's
-        // canResolveThread) × hasUnreviewed (drives next/prev-unreviewed's
-        // hasUnreviewedTarget). undefined | false | true each visited so the
-        // active set is enumerated over the full flow-context space.
-        BOOLS.forEach((hasOpenThread) => {
-          BOOLS.forEach((hasUnreviewed) => {
-            out.push({ entity, view, codeMode, viewCount, hasOpenThread, hasUnreviewed });
+        // flow-signal axes: inReview (gates isReviewable → mark-reviewed-advance +
+        // next/prev-unreviewed), hasOpenThread (canResolveThread handler signal),
+        // hasUnreviewed (next/prev-unreviewed's hasUnreviewedTarget). undefined |
+        // false | true each visited so the active set spans the full flow space.
+        BOOLS.forEach((inReview) => {
+          BOOLS.forEach((hasOpenThread) => {
+            BOOLS.forEach((hasUnreviewed) => {
+              out.push({ entity, view, codeMode, viewCount, inReview, hasOpenThread, hasUnreviewed });
+            });
           });
         });
       });
@@ -156,10 +165,18 @@ describe("when-predicate context-scoping", () => {
     });
   });
 
-  it("isReviewable is true everywhere except pr (unless pr·files)", () => {
+  it("isReviewable requires inReview AND the right surface family", () => {
     CUBE.forEach((c) => {
-      expect(isReviewable(c)).toBe(c.entity !== "pr" || c.view === "files");
+      const surfaceOk = c.entity !== "pr" || c.view === "files";
+      expect(isReviewable(c)).toBe(surfaceOk && c.inReview === true);
     });
+  });
+
+  it("isReviewable is false on the right surface when the review flow is not mounted", () => {
+    // surface family is reviewable, but inReview unset/false → inactive (honest degrade).
+    expect(isReviewable({ entity: "models", view: "topology", viewCount: 3 })).toBe(false);
+    expect(isReviewable({ entity: "models", view: "topology", viewCount: 3, inReview: false })).toBe(false);
+    expect(isReviewable({ entity: "models", view: "topology", viewCount: 3, inReview: true })).toBe(true);
   });
 });
 
@@ -262,6 +279,89 @@ describe("findConflicts — same key in two ACTIVE contexts; cross-screen reuse 
     const prConflicts = findConflicts(km, prActive);
     expect(prConflicts.flatMap((c) => c.actions.map((a) => a.id))).not.toContain("compiled");
   });
+
+  // ── canonical-key conflict identity (the SSOT soundness fix) ────────────────
+  // findConflicts must compare CANONICAL keys (layer|base, shift-aware), NOT raw
+  // tokens. `n` and the shifted `N` are DISTINCT canonical keys; two tokens that
+  // fold to the SAME canonical key ARE a conflict even though the raw tokens
+  // (e.g. "d" vs the alias of a rebind) differ.
+  it("a bare letter and its shift-layer twin are DISTINCT canonical keys (no false conflict)", () => {
+    // inst-next ("n") and next-unreviewed ("N") are co-active on a reviewable
+    // topo shelf with an unreviewed target — but they sit on different layers
+    // (base vs shift), so they are NOT a conflict.
+    expect(canonicalKey("n")).not.toBe(canonicalKey("N"));
+    expect(canonicalKey("n")).toBe("|n");
+    expect(canonicalKey("N")).toBe("shift|n");
+    const active = activeActionIds({
+      entity: "models",
+      view: "topology",
+      viewCount: 3,
+      inReview: true,
+      hasUnreviewed: true,
+    });
+    expect(active.has("inst-next")).toBe(true);
+    expect(active.has("next-unreviewed")).toBe(true);
+    const conflicts = findConflicts(defaultKeymap(), active);
+    const ids = conflicts.flatMap((c) => c.actions.map((a) => a.id));
+    expect(ids).not.toContain("inst-next");
+    expect(ids).not.toContain("next-unreviewed");
+  });
+
+  it("two bindings that resolve to the SAME canonical key in one active context ARE reported", () => {
+    // rebind palette onto "D" (Shift+d) and resolve onto "D" too — both parse to
+    // canonical "shift|d". Make them co-active and assert the conflict surfaces.
+    // (We use the cross-context-safe global form: bind two ALWAYS-on actions.)
+    const km = { ...defaultKeymap(), palette: "D", help: "D" };
+    // palette + help are always-on (no `when`) → co-active everywhere.
+    const active = activeActionIds({ entity: "models", view: "topology", viewCount: 3 });
+    const conflicts = findConflicts(km, active);
+    const ids = conflicts.flatMap((c) => c.actions.map((a) => a.id));
+    expect(ids).toContain("palette");
+    expect(ids).toContain("help");
+    // and they collide on the shift|d canonical key specifically.
+    expect(conflicts.some((c) => c.layer === "shift" && c.base === "d")).toBe(true);
+  });
+
+  it("no two distinct ACTIVE actions share a CANONICAL key in ANY cube cell (canonicalizer-sound)", () => {
+    // The teeth of the soundness guarantee: for every active cube cell, group the
+    // active actions' default tokens by canonical key and assert no group has 2+.
+    // This is what findConflicts asserts via layerBindings — restated directly in
+    // canonical-key terms so the n/N (shift-layer) distinction is exercised in
+    // exactly the cells where both are active (inReview && hasUnreviewed).
+    CUBE.forEach((ctx) => {
+      const active = activeActionIds(ctx);
+      const byCanon = new Map<string, string[]>();
+      ALL_ACTIONS.forEach((a) => {
+        if (!active.has(a.id)) return;
+        const ck = canonicalKey(a.def);
+        const arr = byCanon.get(ck) ?? [];
+        arr.push(a.id);
+        byCanon.set(ck, arr);
+      });
+      byCanon.forEach((ids, ck) => {
+        expect(ids.length, `canonical key ${ck} shared by ${ids.join(", ")} in ${JSON.stringify(ctx)}`).toBe(1);
+      });
+    });
+  });
+
+  it("the canonicalizer agrees with findConflicts on key identity (n/N exercised live)", () => {
+    // The two notions of canonical identity must be the same one: makeCanonicalizer
+    // resolves co-active shift/base twins to DISTINCT canonical tokens, matching
+    // findConflicts' layer split. Pick the cell where both inst-next (n) and
+    // next-unreviewed (N) are active and assert the canonicalizer separates them.
+    const canon = makeCanonicalizer({});
+    expect(canon("n")).toBe("n");
+    expect(canon("N")).toBe("N");
+    // findConflicts sees no conflict between them in that very cell:
+    const active = activeActionIds({
+      entity: "models",
+      view: "topology",
+      viewCount: 3,
+      inReview: true,
+      hasUnreviewed: true,
+    });
+    expect(findConflicts(defaultKeymap(), active)).toEqual([]);
+  });
 });
 
 describe("Council MUST-FIX D — flow actions registered first-class without conflict", () => {
@@ -315,12 +415,17 @@ describe("Council MUST-FIX D — flow actions registered first-class without con
   });
 
   it("hasUnreviewedTarget gates next/prev-unreviewed honestly", () => {
-    const noUnreviewed: KbContext = { entity: "models", view: "topology", viewCount: 3, hasUnreviewed: false };
+    // inReview is required (isReviewable now gates on it) AND an unreviewed target.
+    const noUnreviewed: KbContext = { entity: "models", view: "topology", viewCount: 3, inReview: true, hasUnreviewed: false };
     expect(hasUnreviewedTarget(noUnreviewed)).toBe(false);
     expect(activeActionIds(noUnreviewed).has("next-unreviewed")).toBe(false);
     const withUnreviewed: KbContext = { ...noUnreviewed, hasUnreviewed: true };
     expect(hasUnreviewedTarget(withUnreviewed)).toBe(true);
     expect(activeActionIds(withUnreviewed).has("next-unreviewed")).toBe(true);
+    // without inReview, even an unreviewed target stays inactive (flow not mounted).
+    const notInReview: KbContext = { entity: "models", view: "topology", viewCount: 3, hasUnreviewed: true };
+    expect(hasUnreviewedTarget(notInReview)).toBe(false);
+    expect(activeActionIds(notInReview).has("next-unreviewed")).toBe(false);
   });
 
   it("canResolveThread is the HANDLER signal, not a key-visibility gate", () => {
@@ -340,11 +445,13 @@ describe("Council MUST-FIX D — flow actions registered first-class without con
     expect(activeActionIds(withThread).has("resolve-from-keyboard")).toBe(false);
   });
 
-  it("mark-reviewed-advance is the canonical mark verb (x, reviewable surfaces)", () => {
+  it("mark-reviewed-advance is the canonical mark verb (x, reviewable surfaces, in review)", () => {
     const a = ALL_ACTIONS.find((x) => x.id === "mark-reviewed-advance");
     expect(a?.def).toBe("x");
-    expect(activeActionIds({ entity: "models", view: "code", codeMode: "diff", viewCount: 3 }).has("mark-reviewed-advance")).toBe(true);
-    expect(activeActionIds({ entity: "pr", view: "overview", viewCount: 4 }).has("mark-reviewed-advance")).toBe(false);
+    // active on a reviewable surface ONLY once the review flow is mounted.
+    expect(activeActionIds({ entity: "models", view: "code", codeMode: "diff", viewCount: 3, inReview: true }).has("mark-reviewed-advance")).toBe(true);
+    expect(activeActionIds({ entity: "models", view: "code", codeMode: "diff", viewCount: 3 }).has("mark-reviewed-advance")).toBe(false);
+    expect(activeActionIds({ entity: "pr", view: "overview", viewCount: 4, inReview: true }).has("mark-reviewed-advance")).toBe(false);
   });
 });
 
@@ -373,8 +480,27 @@ describe("makeCanonicalizer — alias + DEAD-shadowing", () => {
     const canon = makeCanonicalizer({});
     expect(canon("d")).toBe("d");
     expect(canon("f")).toBe("f");
-    // case-insensitive single chars
-    expect(canon("D")).toBe("d");
+  });
+
+  it("shift-layer letters are CASE-SENSITIVE (n vs N never collide)", () => {
+    // THE soundness fix: a physical bare `n` → inst-next ("n"); a physical
+    // `Shift+N` (eventKey "N") → next-unreviewed ("N"). A case-folding norm
+    // collapsed both onto "n", silently overwriting the alias slot.
+    const canon = makeCanonicalizer({});
+    expect(canon("n")).toBe("n"); // inst-next
+    expect(canon("N")).toBe("N"); // next-unreviewed (distinct!)
+    expect(canon("b")).toBe("b"); // inst-prev
+    expect(canon("B")).toBe("B"); // prev-unreviewed
+    expect(canon("c")).toBe("c"); // comments-only
+    expect(canon("C")).toBe("C"); // comments-hidden
+    expect(canon("o")).toBe("o"); // next-open-thread
+    expect(canon("O")).toBe("O"); // prev-open-thread
+    expect(canon("R")).toBe("R"); // resolve (shift-layer, no lowercase twin)
+    // a shifted letter with no bound shift-layer action passes through unchanged
+    // (D is not bound; it does NOT fold onto d).
+    expect(canon("D")).toBe("D");
+    // and the bare `d` is still its own canonical key, untouched by the above.
+    expect(canon("d")).toBe("d");
   });
 
   it("a rebound key translates back to the action's canonical default", () => {
@@ -396,9 +522,18 @@ describe("makeCanonicalizer — alias + DEAD-shadowing", () => {
     expect(canon("f")).toBe("f");
   });
 
+  it("shifted-GLYPH tokens (view-N on !@#$) resolve through the shift layer", () => {
+    // Shift+1 → e.key "!" → canonical "shift|1" → view-1's token "!".
+    const canon = makeCanonicalizer({});
+    expect(canon("!")).toBe("!"); // view-1
+    expect(canon("@")).toBe("@"); // view-2
+  });
+
   it("unmapped physical keys pass through unchanged", () => {
     const canon = makeCanonicalizer({});
     expect(canon("z")).toBe("z");
+    // an unbound shift-layer letter passes through (does not fold onto its base).
+    expect(canon("Z")).toBe("Z");
   });
 });
 
@@ -421,18 +556,32 @@ describe("captureKey deny-list (fixed:true + reserved + chords)", () => {
     expect(captureKey({ key: "d", altKey: true })).toBeNull();
   });
 
-  it("accepts a single printable char (letters lowercased)", () => {
-    expect(captureKey({ key: "D" })).toBe("d");
+  it("accepts a single printable char, PRESERVING letter case", () => {
+    // case-preserving so a user can rebind onto a shift-layer letter (Shift+N → "N").
+    expect(captureKey({ key: "d" })).toBe("d");
+    expect(captureKey({ key: "D" })).toBe("D");
+    expect(captureKey({ key: "N" })).toBe("N");
     expect(captureKey({ key: "?" })).toBe("?");
   });
 
-  it("DENY_REBIND_KEYS contains every fixed:true action's key", () => {
+  it("DENY_REBIND_KEYS unions fixed:true defaults AND the reserved non-action keys", () => {
     const fixedDefs = ALL_ACTIONS.filter((a) => a.fixed).map((a) => a.def);
     fixedDefs.forEach((def) => expect(DENY_REBIND_KEYS.has(def)).toBe(true));
     // sanity: Tab/Enter/Space are the fixed keys.
     expect(DENY_REBIND_KEYS.has("Tab")).toBe(true);
     expect(DENY_REBIND_KEYS.has("Enter")).toBe(true);
     expect(DENY_REBIND_KEYS.has(" ")).toBe(true);
+    // the alignment fix: reserved NON-action keys are also denied (so a
+    // programmatic/persisted override can't bypass captureKey's restrictions).
+    ["Escape", "Backspace", "Delete", "ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].forEach((key) =>
+      expect(DENY_REBIND_KEYS.has(key)).toBe(true),
+    );
+    // every RESERVED_KEY (the single source captureKey + the deny-list share) is
+    // rejected by capture AND present in the deny-list — no drift between the two.
+    RESERVED_KEYS.forEach((key) => {
+      expect(captureKey({ key })).toBeNull();
+      expect(DENY_REBIND_KEYS.has(key)).toBe(true);
+    });
   });
 });
 
@@ -483,13 +632,16 @@ describe("footerHints — registry-derived chips, honest flow degrade", () => {
 
   it("the flow chips degrade honestly: greyed when their when-context is unmet", () => {
     // models·topology with NO unreviewed target → the unreviewed chip is greyed.
-    const chips = footerHints({ entity: "models", view: "topology", viewCount: 3, hasUnreviewed: false });
+    const chips = footerHints({ entity: "models", view: "topology", viewCount: 3, inReview: true, hasUnreviewed: false });
     const unreviewed = chips.find((c) => c.label === "unreviewed");
     expect(unreviewed).toBeDefined();
     expect(unreviewed?.active).toBe(false);
-    // with an unreviewed target it becomes active.
-    const active = footerHints({ entity: "models", view: "topology", viewCount: 3, hasUnreviewed: true });
+    // with the flow mounted AND an unreviewed target it becomes active.
+    const active = footerHints({ entity: "models", view: "topology", viewCount: 3, inReview: true, hasUnreviewed: true });
     expect(active.find((c) => c.label === "unreviewed")?.active).toBe(true);
+    // without inReview the chip is still emitted (surface family) but greyed.
+    const notMounted = footerHints({ entity: "models", view: "topology", viewCount: 3, hasUnreviewed: true });
+    expect(notMounted.find((c) => c.label === "unreviewed")?.active).toBe(false);
   });
 
   it("the resolve chip IS the keyboard-resolve flow chip (⇧R, active in-threads)", () => {

@@ -77,8 +77,10 @@ describe("effectiveKeymap + canonicalizerFor (domain re-exports)", () => {
     expect(canon("d")).toBe(DEAD); // the vacated default is shadowed
   });
 
-  it("captureRebind mirrors the domain captureKey deny-list", () => {
+  it("captureRebind mirrors the domain captureKey (deny-list + case-preserving)", () => {
     expect(captureRebind({ key: "Tab" })).toBeNull();
-    expect(captureRebind({ key: "D" })).toBe("d");
+    // case is PRESERVED so a shift-layer letter (Shift+N → "N") stays rebindable.
+    expect(captureRebind({ key: "D" })).toBe("D");
+    expect(captureRebind({ key: "d" })).toBe("d");
   });
 });

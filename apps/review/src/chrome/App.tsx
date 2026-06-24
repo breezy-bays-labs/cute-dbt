@@ -168,8 +168,11 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
         {/* ── Model list (from models[]) ── */}
         <aside
           data-testid="model-list"
-          className="w-64 shrink-0 border-r border-zinc-800 p-3"
-          style={{ maxHeight: "calc(100vh - 96px)", overflow: "auto" }}
+          // Height is bounded by the flex parent (`flex-1 min-h-0` row), not a
+          // viewport calc — so the scroll region ends at the column bottom and
+          // never renders behind the `h-9` status-bar footer. (A `calc(100vh - …)`
+          // offset ignored the footer height; flex sizing tracks it for free.)
+          className="h-full w-64 shrink-0 overflow-auto border-r border-zinc-800 p-3"
         >
           <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">
             Models ({context.models.length})
