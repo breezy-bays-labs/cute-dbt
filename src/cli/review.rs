@@ -1575,6 +1575,11 @@ impl ComposeInputs {
             // slice can wire `review`'s own `--findings-out` / gate flags
             // through here.
             findings_out: None,
+            // cute-dbt#491 — `--context-out` is a `report`-verb surface;
+            // `review` does not emit the context artifact in this slice (a
+            // future slice can wire it through here, the `findings_out`
+            // precedent).
+            context_out: None,
             fail_on_uncovered: false,
             // cute-dbt#393 — `review --annotations` passes straight through
             // to the composed `report --pr-diff` run, which resolves the

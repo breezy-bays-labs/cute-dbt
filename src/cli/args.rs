@@ -307,6 +307,24 @@ pub struct ReportArgs {
     #[arg(long, value_name = "PATH")]
     pub findings_out: Option<PathBuf>,
 
+    /// Emit the structured **context** payload as standalone JSON to this
+    /// path, alongside the HTML `--out` report in the same run (cute-dbt#491).
+    ///
+    /// Additive sidecar — NOT a format swap: the HTML report is written
+    /// exactly as before (byte-identical), and this writes the SAME payload
+    /// that report inlines (the `<script id="cute-dbt-data">` blob) as a
+    /// standalone, versioned JSON file. The artifact is the domain's
+    /// [`ContextEnvelope`](crate::domain::ContextEnvelope):
+    /// `{ "metadata": { "schema_version": <int> }, "data": { ... } }`, where
+    /// `data` is byte-identical to the inlined payload and
+    /// `metadata.schema_version` is the integer stability anchor downstream
+    /// consumers (the TS review app's drift-gate) pin to — so a *thin*
+    /// context (legitimately sparse) is distinguishable from a *downgraded*
+    /// one (an older/incompatible producer). The file's parent directory
+    /// must already exist (the same contract as `--out` / `--findings-out`).
+    #[arg(long, value_name = "PATH")]
+    pub context_out: Option<PathBuf>,
+
     /// Exit non-zero when the in-scope set carries any **Total-tier
     /// `Uncovered`** finding (cute-dbt#386) — the deterministic
     /// coverage-gap gate for CI.
@@ -517,17 +535,31 @@ fn parse_project_root(s: &str) -> Result<PathBuf, String> {
 /// when `report`'s `--findings-out` equals its `--out`.
 pub fn validate_argument_conflicts(cli: &Cli) -> Result<(), clap::Error> {
     use clap::CommandFactory;
-    if let Command::Report(report) = &cli.command
-        && report.findings_out.as_ref() == Some(&report.out)
-    {
-        return Err(Cli::command().error(
-            clap::error::ErrorKind::ArgumentConflict,
-            format!(
-                "--findings-out must differ from --out (both resolve to {}); \
-                 the sidecar JSON would overwrite the HTML report",
-                report.out.display()
-            ),
-        ));
+    if let Command::Report(report) = &cli.command {
+        if report.findings_out.as_ref() == Some(&report.out) {
+            return Err(Cli::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                format!(
+                    "--findings-out must differ from --out (both resolve to {}); \
+                     the sidecar JSON would overwrite the HTML report",
+                    report.out.display()
+                ),
+            ));
+        }
+        // cute-dbt#491 — the same footgun for the context sidecar: a
+        // `--context-out` resolving to `--out` would clobber the just-rendered
+        // HTML with the context JSON. Syntactic comparison (the as-typed
+        // `PathBuf`s), exit-2 usage error — the `--findings-out` precedent.
+        if report.context_out.as_ref() == Some(&report.out) {
+            return Err(Cli::command().error(
+                clap::error::ErrorKind::ArgumentConflict,
+                format!(
+                    "--context-out must differ from --out (both resolve to {}); \
+                     the context JSON would overwrite the HTML report",
+                    report.out.display()
+                ),
+            ));
+        }
     }
     Ok(())
 }
@@ -1779,6 +1811,52 @@ tilte = "typo'd"
             msg.contains("--findings-out") && msg.contains("--out"),
             "the error names both flags: {msg}"
         );
+    }
+
+    #[test]
+    fn context_out_equal_to_out_is_an_argument_conflict() {
+        // cute-dbt#491 — the same footgun for the context sidecar: a
+        // `--context-out` resolving to `--out` would clobber the HTML report.
+        let cli = parse(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "report.html",
+            "--context-out",
+            "report.html",
+        ])
+        .expect("the args themselves parse — the collision is a post-parse check");
+        let err = validate_argument_conflicts(&cli)
+            .expect_err("--context-out == --out is a usage conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        assert!(err.use_stderr(), "the path collision is a usage error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--context-out") && msg.contains("--out"),
+            "the error names both flags: {msg}"
+        );
+    }
+
+    #[test]
+    fn distinct_context_out_and_out_pass_validation() {
+        let cli = parse(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "report.html",
+            "--context-out",
+            "context.json",
+        ])
+        .expect("distinct output paths parse");
+        validate_argument_conflicts(&cli).expect("distinct paths are not a conflict");
     }
 
     #[test]

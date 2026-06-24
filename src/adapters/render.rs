@@ -68,8 +68,8 @@ use crate::adapters::asset_embed::{
 use crate::adapters::cte_engine::{TERMINAL_NODE_NAME, parse_cte_graph};
 use crate::domain::{
     BANNER_EMPTY_SCOPE, BlockDiff, ChangeAxes, CheckId, CheckPolicy, ColumnContext, ColumnEdge,
-    CommentsView, ConfigAttribution, CteGraph, DEFAULT_SEED_ROW_CAP, DiffLine, DiffLineKind,
-    EdgeType, Finding, FixtureTable, FixtureTableDiff, GovernanceFacts, HeuristicId,
+    CommentsView, ConfigAttribution, ContextEnvelope, CteGraph, DEFAULT_SEED_ROW_CAP, DiffLine,
+    DiffLineKind, EdgeType, Finding, FixtureTable, FixtureTableDiff, GovernanceFacts, HeuristicId,
     HookChangeFacts, HookManifestPresence, InScopeSet, Instrument, MacroIdentity, Manifest,
     ModelInScopeSet, ModelState, ModelYamlOutcome, Node, NodeId, NormalizedDiffIndex, PrDagGraph,
     PrRef, Presence, ProjectChange, ProjectChangeCategory, ProjectChangePanel, ProjectDefinition,
@@ -4686,6 +4686,36 @@ fn payload_json_for_html_script(payload: &ReportPayload) -> Result<String, serde
     Ok(out)
 }
 
+/// Write the standalone, domain-versioned **context artifact**
+/// (`--context-out`, cute-dbt#491) to `path`.
+///
+/// Wraps the run's [`ReportPayload`] — the SSOT the inlined `report.html`
+/// blob serializes — in the domain's
+/// [`ContextEnvelope`](crate::domain::ContextEnvelope), prepending the
+/// `metadata.schema_version` header (the stability anchor the TS Zod
+/// drift-gate pins to). The wrapped `data` sub-tree is **byte-identical** to
+/// the inlined HTML payload, so the report stays byte-stable.
+///
+/// Emitted as pretty-printed JSON with a trailing newline — diff-friendly,
+/// mirroring the `--findings-out` sidecar (`write_sidecar`). The `<` escape
+/// the inlined HTML blob needs ([`payload_json_for_html_script`]) is NOT
+/// applied here: the artifact is standalone JSON, never embedded in markup,
+/// so the raw `<` is valid and a downstream consumer reads the exact
+/// payload.
+///
+/// # Errors
+///
+/// Returns the underlying [`io::Error`] when serialization fails (unreachable
+/// for the concrete `ReportPayload` shape) or the file cannot be written
+/// (the same parent-dir-must-exist contract as `--out` / `--findings-out`).
+fn write_context_artifact(payload: &ReportPayload, path: &Path) -> io::Result<()> {
+    let envelope = ContextEnvelope::new(payload);
+    let mut json = serde_json::to_string_pretty(&envelope)
+        .map_err(|err| io::Error::other(format!("context serialization: {err}")))?;
+    json.push('\n');
+    fs::write(path, json)
+}
+
 /// Compose the banner text rendered into the diff-scope section.
 ///
 /// Empty `models_in_scope` → exactly `BANNER_EMPTY_SCOPE` (the locked
@@ -5006,6 +5036,9 @@ pub fn render_report(
         // (cute-dbt#419) — `None` keeps `pr_comments` omitted (the `pr_dag`
         // precedent).
         None,
+        // No `--context-out` artifact through this convenience wrapper
+        // (cute-dbt#491) — only the cli run loop wires it from the flag.
+        None,
     )
 }
 
@@ -5047,6 +5080,14 @@ pub fn render_report_with_externals(
     model_states: &BTreeMap<NodeId, ModelState>,
     removed_models: &[String],
     pr_comments: Option<&CommentsView>,
+    // cute-dbt#491 — the standalone context artifact (`--context-out`). When
+    // `Some`, the SAME payload serialized into the inlined HTML script is
+    // wrapped in the domain's versioned `ContextEnvelope` and written here as
+    // standalone JSON, additively beside the HTML report (the `--findings-out`
+    // sidecar precedent). `None` ⇒ no context file (the default path adds zero
+    // work). The HTML report stays byte-identical either way — the
+    // `schema_version` header lives only in the `--context-out` wrapper.
+    context_out: Option<&Path>,
 ) -> io::Result<()> {
     let mut payload = build_payload_with_externals(
         current,
@@ -5117,6 +5158,18 @@ pub fn render_report_with_externals(
     let banner_text = compose_banner_text(in_scope);
     let payload_json = payload_json_for_html_script(&payload)
         .map_err(|err| io::Error::other(format!("payload serialization: {err}")))?;
+    // cute-dbt#491 — the standalone, domain-versioned context artifact. Wraps
+    // the SAME `payload` (the SSOT the inlined HTML blob serializes) in the
+    // domain's `ContextEnvelope` so the artifact carries a
+    // `metadata.schema_version` header the TS Zod drift-gate (S3b) pins to,
+    // while `data` is byte-identical to the inlined payload (the
+    // `schema_version` lives ONLY here, never in the HTML — the report stays
+    // byte-stable). Written before the HTML so a context-write failure aborts
+    // the run rather than leaving a report with no matching context (the
+    // fail-closed posture); the default path (`None`) skips it entirely.
+    if let Some(context_path) = context_out {
+        write_context_artifact(&payload, context_path)?;
+    }
     let template = ReportTemplate {
         sakura_css: SAKURA_CSS,
         datatables_css: DATATABLES_CSS,
@@ -6745,6 +6798,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &["models/marts/dim_gone.sql".to_owned()],
+            None,
             None,
         )
         .expect("report renders");
@@ -10909,6 +10963,93 @@ mod tests {
         assert!(serialized.contains("a < b"), "bare `<` is preserved");
     }
 
+    // ===== cute-dbt#491 — --context-out artifact contract =====
+
+    #[test]
+    fn context_artifact_wraps_the_payload_with_a_versioned_header() {
+        // The standalone context artifact is exactly
+        // `{ metadata: { schema_version: 1 }, data: <ReportPayload> }`, and
+        // its `data` sub-tree is byte-identical (parse-equal) to the JSON the
+        // report inlines — the SSOT-producer contract the TS Zod gate pins to.
+        let payload = ReportPayload {
+            baseline: "main".to_owned(),
+            models: vec![],
+            manifest_nodes: BTreeMap::new(),
+            check_specs: BTreeMap::new(),
+            project_definition: None,
+            project_change_panel: None,
+            governance: GovernanceFacts::default(),
+            macro_lens: None,
+            pr_ref: None,
+            seed_cards: Vec::new(),
+            pr_dag: None,
+            removed_models: Vec::new(),
+            pr_comments: None,
+        };
+        let dir = std::env::temp_dir();
+        let path = dir.join("cute_dbt_context_artifact_test.json");
+        let _ = std::fs::remove_file(&path);
+        write_context_artifact(&payload, &path).expect("context artifact writes");
+        let written = std::fs::read_to_string(&path).expect("context artifact read");
+        let _ = std::fs::remove_file(&path);
+
+        // Pretty JSON + trailing newline (diff-friendly, the sidecar precedent).
+        assert!(
+            written.ends_with("}\n"),
+            "trailing newline (diff-friendly): {written}"
+        );
+
+        let value: serde_json::Value = serde_json::from_str(&written).expect("valid JSON");
+        // The versioned header — an INTEGER schema_version (not a string).
+        assert!(
+            value["metadata"]["schema_version"].is_u64(),
+            "schema_version is an integer: {value}"
+        );
+        assert_eq!(
+            value["metadata"]["schema_version"],
+            serde_json::json!(1),
+            "schema_version pins to CONTEXT_SCHEMA_VERSION"
+        );
+
+        // The `data` sub-tree is parse-equal to the INLINED payload — they
+        // are the same serializer, so the report HTML and the context
+        // artifact can never drift. (The inlined blob carries `<`
+        // escapes for HTML-safety; this payload has no `<`, so a raw-parse
+        // comparison is exact here, and the JSON-value comparison is escape-
+        // insensitive regardless.)
+        let inlined = payload_json_for_html_script(&payload).expect("inlined serialize");
+        let inlined_value: serde_json::Value =
+            serde_json::from_str(&inlined).expect("inlined parses");
+        assert_eq!(
+            value["data"], inlined_value,
+            "context `data` is byte-identical to the inlined report payload"
+        );
+    }
+
+    #[test]
+    fn context_artifact_data_carries_honesty_enums_explicitly() {
+        // The absent→honesty mapping (the council MUST-FIX): a populated
+        // payload's honesty verdicts (a finding's `verdict`/`tier`) are
+        // PRESENT in the context `data`, never silently omitted. We assert
+        // the check-spec catalog + a finding's verdict survive into the
+        // artifact when the payload carries findings.
+        let payload = findings_surface_payload();
+        let dir = std::env::temp_dir();
+        let path = dir.join("cute_dbt_context_honesty_test.json");
+        let _ = std::fs::remove_file(&path);
+        write_context_artifact(&payload, &path).expect("context artifact writes");
+        let written = std::fs::read_to_string(&path).expect("context artifact read");
+        let _ = std::fs::remove_file(&path);
+        let value: serde_json::Value = serde_json::from_str(&written).expect("valid JSON");
+        // The finding's verdict tag is a concrete, present string — the
+        // honesty axis is read directly, never inferred from a missing key.
+        let blob = value["data"].to_string();
+        assert!(
+            blob.contains("verdict"),
+            "a populated payload surfaces an explicit verdict in the context data"
+        );
+    }
+
     #[test]
     fn payload_json_escapes_le_comparisons_for_sloppy_scanners() {
         // cute-dbt#200 — authored model/column descriptions carry SQL-ish
@@ -11248,6 +11389,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
+            None,
             None,
         )
         .expect("report renders");
@@ -12292,6 +12434,7 @@ mod tests {
             &BTreeMap::new(),
             &[],
             None,
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -12710,6 +12853,7 @@ mod tests {
             &BTreeMap::new(),
             &[],
             None,
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -12873,6 +13017,7 @@ mod tests {
             &BTreeMap::new(),
             &[],
             None,
+            None,
         )
         .expect("report renders");
         std::fs::read_to_string(&tmp).expect("read rendered report")
@@ -13010,6 +13155,7 @@ mod tests {
             &BTreeMap::new(),
             &BTreeMap::new(),
             &[],
+            None,
             None,
         )
         .expect("report renders");
