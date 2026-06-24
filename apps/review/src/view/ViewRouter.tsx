@@ -18,6 +18,8 @@ import { LineageGraph } from "./LineageGraph";
 import { CodePane } from "./CodePane";
 import { PrScopeLineage } from "./graph/PrScopeLineage";
 import { ModelReviewSurface } from "./review/ModelReviewSurface";
+import { ModelDetails } from "./models/ModelDetails";
+import { ModelUnitTests } from "./models/ModelUnitTests";
 import { TopologyPanes } from "./topology/TopologyPanes";
 import { PrOverview, PrFiles, PrTimeline } from "./pr/PrPage";
 import type {
@@ -135,9 +137,24 @@ export function ViewRouter(p: ViewRouterProps): React.ReactElement {
         </div>
       );
     case "models-node":
-      return <Placeholder label="Models · Details" detail={`Node details for ${p.sel ?? "—"}`} />;
+      // S7 — the Models · Details view: the model's identity + config facts from
+      // the payload (materialization / tags / node config / lineage summary /
+      // documented columns), honest-empty for any facet the payload lacks.
+      return p.model ? (
+        <ModelDetails model={p.model} />
+      ) : (
+        <Placeholder label="Models · Details" detail={`Node details for ${p.sel ?? "—"}`} />
+      );
     case "models-data":
-      return <Placeholder label="Models · Unit tests" detail={`Unit-test data for ${p.sel ?? "—"}`} />;
+      // S7 — the Models · Unit tests view: the model's unit tests rendered from
+      // the context (given/expect grids with cell-level diffs), an honest external-
+      // fixture note, and an honest no-unit-tests empty state. Self-manages the
+      // test cursor + the Diff/File mode (mounted bare by the chrome).
+      return p.model ? (
+        <ModelUnitTests model={p.model} />
+      ) : (
+        <Placeholder label="Models · Unit tests" detail={`Unit-test data for ${p.sel ?? "—"}`} />
+      );
     case "models-code":
       // V1: the Models code/diff REVIEWABLE surface — the thin vertical that
       // makes Models reviewable end-to-end (council MUST-FIX D). The keyboard
