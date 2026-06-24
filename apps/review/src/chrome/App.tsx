@@ -17,6 +17,8 @@ import type { ContextData } from "../domain/context-data";
 import { DiffViewer } from "../view/DiffViewer";
 import { LineageGraph } from "../view/LineageGraph";
 import { CodePane } from "../view/CodePane";
+import { Footer } from "../view/Footer";
+import type { KbContext } from "../domain/keymap";
 
 // Static entity tabs (S0 surface — only Models is wired; the rest are skeleton
 // tabs proving the chrome, populated in later slices).
@@ -36,6 +38,10 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   const setTheme = useAppStore((s) => s.setTheme);
   const selectedModel = useAppStore((s) => s.selectedModel);
   const setSelectedModel = useAppStore((s) => s.setSelectedModel);
+  // S1 keymap slice — the sparse rebind override feeds the registry-derived
+  // footer (so chip keys reflect any rebinding). S2 wires the live keydown
+  // dispatcher off this same override + the domain canonicalizer.
+  const keymapOverride = useAppStore((s) => s.keymapOverride);
 
   const [themeError, setThemeError] = useState<string | null>(null);
 
@@ -54,6 +60,18 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   const ctx: ReviewContext | undefined =
     contexts.find((c) => c.name === activeName) ?? contexts[0];
   const shiki = shikiName(theme);
+
+  // Minimal placeholder context for the registry-fed footer (S1). S2 wires the
+  // real entity·view·codeMode + review-flow signals from the nav/review slices;
+  // here we anchor on the only wired surface (Models·topology) so the footer
+  // proves it derives from the registry — the flow chips degrade honestly
+  // (greyed) since no unreviewed-target / open-thread signal is fed yet.
+  const footerCtx: KbContext = {
+    entity: "models",
+    view: "topology",
+    viewCount: 3,
+    noun: "model",
+  };
 
   // Compiled SQL joined in DAG order for the Shiki pane.
   const compiledSql = useMemo(() => {
@@ -83,7 +101,7 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   }, [shiki]);
 
   return (
-    <div className="min-h-screen bg-zinc-950 text-zinc-200" style={{ fontFamily: "system-ui, sans-serif" }}>
+    <div className="flex min-h-screen flex-col bg-zinc-950 text-zinc-200" style={{ fontFamily: "system-ui, sans-serif" }}>
       <Toaster theme="dark" />
       {/* ── Header chrome (Tailwind v4) ── */}
       <header className="flex flex-wrap items-center gap-3 border-b border-zinc-800 px-6 py-3">
@@ -146,12 +164,15 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
         </div>
       )}
 
-      <div className="flex">
+      <div className="flex flex-1 min-h-0">
         {/* ── Model list (from models[]) ── */}
         <aside
           data-testid="model-list"
-          className="w-64 shrink-0 border-r border-zinc-800 p-3"
-          style={{ maxHeight: "calc(100vh - 96px)", overflow: "auto" }}
+          // Height is bounded by the flex parent (`flex-1 min-h-0` row), not a
+          // viewport calc — so the scroll region ends at the column bottom and
+          // never renders behind the `h-9` status-bar footer. (A `calc(100vh - …)`
+          // offset ignored the footer height; flex sizing tracks it for free.)
+          className="h-full w-64 shrink-0 overflow-auto border-r border-zinc-800 p-3"
         >
           <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">
             Models ({context.models.length})
@@ -219,6 +240,9 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
           )}
         </main>
       </div>
+
+      {/* ── Registry-fed status-bar footer (S1) ── */}
+      <Footer ctx={footerCtx} keymapOverride={keymapOverride} />
     </div>
   );
 }

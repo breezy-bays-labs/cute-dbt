@@ -4,7 +4,7 @@ import { defineConfig } from "vitest/config";
 // behavioral local-first gate) are excluded — they run under `playwright test`.
 export default defineConfig({
   test: {
-    include: ["src/**/*.test.ts", "tests/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "tests/**/*.test.ts"],
     exclude: ["**/node_modules/**", "**/dist/**", "tests/**/*.spec.ts"],
     environment: "node",
     coverage: {
