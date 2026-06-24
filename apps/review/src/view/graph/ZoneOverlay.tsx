@@ -115,8 +115,10 @@ export function ZoneOverlay({ zones, byId, selectedZone, onSelectZone }: ZoneOve
               <rect x={r.rx} y={r.ry} width={r.rw} height={r.rh} rx={14} fill="none"
                 stroke="transparent" strokeWidth={16}
                 style={{ pointerEvents: "stroke", cursor: "pointer" }} onMouseDown={(e) => e.stopPropagation()} onClick={pick} />
-              {/* the per-ring legend pill, pinned to THIS ring's top edge */}
-              <g transform={`translate(${r.rx + 13},${r.ry})`} style={{ cursor: "pointer", pointerEvents: "all" }}
+              {/* the per-ring legend pill, pinned to THIS ring's top edge — the
+                  click target (pointer-events:all) while the ring FILL stays
+                  click-through (pointer-events:none above). */}
+              <g data-testid="zone-legend-hit" transform={`translate(${r.rx + 13},${r.ry})`} style={{ cursor: "pointer", pointerEvents: "all" }}
                 onMouseDown={(e) => e.stopPropagation()} onClick={pick}>
                 <rect x={0} y={-8.5} width={pillW} height={17} rx={5}
                   fill={r.on ? C : "var(--surface, #16161e)"} stroke={C} strokeOpacity={r.on ? 1 : 0.65} strokeWidth={1} />

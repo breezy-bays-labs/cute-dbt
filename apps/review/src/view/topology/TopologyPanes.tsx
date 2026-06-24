@@ -22,6 +22,8 @@
 import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from "react";
 import { LineageGraph } from "../graph/LineageGraph";
 import { CompiledView } from "./CompiledView";
+import { DetailShelf, type ShelfDock, type ShelfMode } from "./DetailShelf";
+import { ZonePresenceList } from "./ZonePresence";
 import {
   initialSyncState, selectNode, selectZone, syncForward, syncFromCursor, spanForNode,
   type SyncMaps, type SyncState,
@@ -29,10 +31,21 @@ import {
 import { buildSyncMaps } from "../../domain/sync-maps";
 import { cteDagToGraph, rawGraphToGraphData } from "../../domain/topology-graphs";
 import { rawDagToGraph, ensureMainNode } from "../../domain/data/raw-spans";
+import { zonePresenceTreatments } from "../../domain/data/zone-presence";
 import type { GraphData } from "../../domain/graph-model";
 import type { ModelPayload } from "../../domain/context-data";
 
 type Shelf = "compiled" | "raw";
+
+/** The shelf-mode (Detail-shelf segmented) ⇄ pane-source (compiled/raw) mapping.
+ *  The DetailShelf speaks the Diff/File/Compiled vocabulary; this slice's pane is
+ *  the 2-state Compiled/File toggle, so `file` ↔ `raw`. */
+function shelfModeToSource(m: ShelfMode): Shelf {
+  return m === "file" ? "raw" : "compiled";
+}
+function sourceToShelfMode(s: Shelf): ShelfMode {
+  return s === "raw" ? "file" : "compiled";
+}
 
 /** The sync-machine actions this container dispatches (each delegates to a pure
  *  S6a reducer — no extra logic lives in the reducer). */
@@ -80,6 +93,10 @@ export interface TopologyPanesProps {
 
 export function TopologyPanes({ model, shiki }: TopologyPanesProps): React.ReactElement {
   const [shelf, setShelf] = useState<Shelf>("compiled");
+  // ── S6c DETAIL-SHELF chrome state (all LOCAL — never touches cursor-sync) ────
+  const [dock, setDock] = useState<ShelfDock>("side");
+  const [fullscreen, setFullscreen] = useState(false);
+  const [pinned, setPinned] = useState(false);
   const [state, dispatch] = useReducer(syncReducer, undefined, initialSyncState);
   // scrollKey mirrors the machine's scrollNonce into a prop the CompiledView
   // effect keys on (a node pick → one DIRECT-scroll + ring-flash).
@@ -87,6 +104,15 @@ export function TopologyPanes({ model, shiki }: TopologyPanesProps): React.React
 
   // ── the SyncMaps the machine resolves over (null ⇒ honest-empty) ────────────
   const maps = useMemo(() => buildSyncMaps(model), [model]);
+
+  // ── the honest 3-state zone-presence treatments (compiled_in / compiled_out /
+  //    structural) — the never-a-false-claim surface for the shelf. A compiled_out
+  //    {% for %} (is_incremental stripped it) renders the honest incremental-only
+  //    explainer here, NOT a fabricated body. Honest-empty when no raw_zones. ───
+  const zoneTreatments = useMemo(
+    () => zonePresenceTreatments(model.code_map?.raw_zones, model.code_map?.node_map?.raw),
+    [model],
+  );
 
   // ── the compiled + raw graphs (built once per model) ────────────────────────
   const compiledGraph: GraphData = useMemo(() => cteDagToGraph(model.dag), [model]);
@@ -121,6 +147,8 @@ export function TopologyPanes({ model, shiki }: TopologyPanesProps): React.React
     if (lastModel.current !== modelKey) {
       lastModel.current = modelKey;
       setShelf("compiled");
+      setFullscreen(false);
+      setPinned(false);
       // reset always lands on the compiled shelf → compiled side.
       dispatch({ type: "selectNode", id: null, side: "compiled", maps: maps ?? { nodeSpans: {} } });
     }
@@ -153,58 +181,114 @@ export function TopologyPanes({ model, shiki }: TopologyPanesProps): React.React
   // the selected zone id → the DAG ring highlight (raw side only).
   const selectedZone = dagMode === "raw" ? state.zone : null;
 
-  return (
-    <div data-testid="topology-panes" data-dag-mode={dagMode} data-shelf={shelf} className="flex min-h-0 flex-1 flex-col gap-3 lg:flex-row">
-      {/* ── the DAG (compiled CTE | raw), following the shelf ── */}
-      <section data-testid="topology-dag" className="min-w-0 flex-1">
-        <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-wide text-zinc-500">
-          <span>{dagMode === "raw" ? "Raw DAG" : "Compiled CTE DAG"}</span>
-        </div>
-        <LineageGraph
-          key={"topo-" + model.name + "-" + dagMode}
-          data={activeGraph}
-          selected={state.node}
-          selectedZone={selectedZone}
-          onSelect={onSelectNode}
-          onSelectZone={onSelectZone}
-          recenter={false}
-          height={340}
-        />
-      </section>
+  // the DetailShelf mode segmented (Compiled / File) ⇄ the pane source. Each
+  // option ALSO carries the legacy `shelf-toggle`/`data-mode` selectors the S6b
+  // gate drives, so the resize/dock/pin chrome wraps the same toggle contract.
+  const onShelfMode = useCallback((m: ShelfMode) => setShelf(shelfModeToSource(m)), []);
+  const modeOptions = useMemo(
+    () => [
+      { value: "compiled" as ShelfMode, label: "Compiled", testId: "shelf-toggle", data: { mode: "compiled" } },
+      { value: "file" as ShelfMode, label: "File", disabled: !rawText, testId: "shelf-toggle", data: { mode: "raw" } },
+    ],
+    [rawText],
+  );
 
-      {/* ── the code pane (compiled | file/raw), reflecting the sync ── */}
-      <section data-testid="topology-shelf" className="flex min-w-0 flex-1 flex-col">
-        <div className="mb-2 flex items-center gap-1 text-xs">
-          <span className="mr-2 uppercase tracking-wide text-zinc-500">source</span>
-          {(["compiled", "raw"] as const).map((m) => (
-            <button
-              key={m}
-              type="button"
-              data-testid="shelf-toggle"
-              data-mode={m}
-              data-active={shelf === m}
-              disabled={m === "raw" && !rawText}
-              onClick={() => setShelf(m)}
-              className={
-                "rounded px-2 py-0.5 font-mono text-[11px] " +
-                (shelf === m ? "bg-sky-500/20 text-sky-200" : "text-zinc-400 hover:bg-zinc-800") +
-                (m === "raw" && !rawText ? " cursor-not-allowed opacity-40" : "")
-              }
-            >
-              {m === "compiled" ? "Compiled" : "File"}
-            </button>
-          ))}
-        </div>
-        <SyncedCompiledView
-          text={paneText}
-          shiki={shiki}
-          span={span}
-          cursorLine={state.cursor}
-          scrollKey={scrollKey}
-          side={paneSide}
-          maps={maps}
-          onCursorLine={onCursorLine}
-        />
+  // the pinnable model-info panel (native dbt facts — change-state + path).
+  const info = (
+    <div className="space-y-1">
+      <div className="flex flex-wrap items-center gap-1.5">
+        {model.state && (
+          <span data-testid="info-state" className="rounded border border-zinc-700 px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wide text-zinc-300">
+            {model.state}
+          </span>
+        )}
+        {model.is_incremental && (
+          <span className="rounded border px-1.5 py-0.5 text-[10px] font-mono uppercase tracking-wide" style={{ color: "var(--mat-incremental, #e69f00)", borderColor: "var(--mat-incremental, #e69f00)" }}>
+            incremental
+          </span>
+        )}
+      </div>
+      {model.path && <div className="font-mono text-[11px] text-zinc-500">{model.path}</div>}
+      {model.description && <div className="text-[12px] text-zinc-400">{model.description}</div>}
+    </div>
+  );
+
+  // the shelf BODY = the synced code pane + the honest 3-state zone treatments.
+  const shelfBody = (
+    <div className="flex min-h-0 flex-1 flex-col gap-3 p-3">
+      <SyncedCompiledView
+        text={paneText}
+        shiki={shiki}
+        span={span}
+        cursorLine={state.cursor}
+        scrollKey={scrollKey}
+        side={paneSide}
+        maps={maps}
+        onCursorLine={onCursorLine}
+      />
+      {/* the honest 3-state Jinja-zone treatments (the compiled_out incremental-only
+          explainer surfaces here — never a fabricated body). Honest-empty when no
+          raw_zones (ZonePresenceList renders nothing). */}
+      <ZonePresenceList treatments={zoneTreatments} />
+    </div>
+  );
+
+  return (
+    <div
+      data-testid="topology-panes"
+      data-dag-mode={dagMode}
+      data-shelf={shelf}
+      data-dock={dock}
+      data-fullscreen={fullscreen ? "true" : "false"}
+      className={
+        "flex min-h-0 flex-1 gap-3 " +
+        (dock === "bottom" ? "flex-col" : "flex-col lg:flex-row")
+      }
+    >
+      {/* ── the DAG (compiled CTE | raw), following the shelf. Hidden when the
+            shelf is fullscreen (the full-bleed detail view). ── */}
+      {!fullscreen && (
+        <section data-testid="topology-dag" className="min-w-0 flex-1">
+          <div className="mb-2 flex items-center gap-2 text-xs uppercase tracking-wide text-zinc-500">
+            <span>{dagMode === "raw" ? "Raw DAG" : "Compiled CTE DAG"}</span>
+          </div>
+          <LineageGraph
+            key={"topo-" + model.name + "-" + dagMode}
+            data={activeGraph}
+            selected={state.node}
+            selectedZone={selectedZone}
+            onSelect={onSelectNode}
+            onSelectZone={onSelectZone}
+            recenter={false}
+            height={340}
+          />
+        </section>
+      )}
+
+      {/* ── the DETAIL SHELF wrapping the code pane (compiled | file/raw) + the
+            honest zone treatments, reflecting the cursor-sync. The shelf owns the
+            resize/dock/fullscreen/pin chrome + the shelf-mode segmented; it
+            consumes the sync (never modifies cursor-sync.ts). ── */}
+      <section
+        data-testid="topology-shelf"
+        className={"flex min-w-0 flex-col " + (fullscreen ? "flex-1" : "min-h-0 flex-1")}
+      >
+        <DetailShelf
+          title={model.name}
+          subtitle={model.state ? model.state + " · topology" : "topology"}
+          mode={sourceToShelfMode(shelf)}
+          onMode={onShelfMode}
+          modeOptions={modeOptions}
+          dock={dock}
+          onDock={setDock}
+          fullscreen={fullscreen}
+          onFullscreen={setFullscreen}
+          pinned={pinned}
+          onPin={setPinned}
+          info={info}
+        >
+          {shelfBody}
+        </DetailShelf>
       </section>
     </div>
   );
