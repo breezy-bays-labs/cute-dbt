@@ -1,0 +1,3 @@
+/* Tailwind v4 entry — single @import, no PostCSS (the @tailwindcss/vite plugin
+   handles it). System-font stack only; NO webfont @import (local-first). */
+@import "tailwindcss";

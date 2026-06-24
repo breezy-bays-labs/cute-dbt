@@ -1,0 +1,691 @@
+{
+  "baseline": "",
+  "models": [
+    {
+      "name": "fct_orders",
+      "path": "models/marts/fct_orders.sql",
+      "dag": {
+        "nodes": [
+          {
+            "id": "items",
+            "role": "import"
+          },
+          {
+            "id": "(final select)",
+            "label": "fct_orders.sql",
+            "role": "final"
+          }
+        ],
+        "edges": [
+          {
+            "from": "items",
+            "to": "(final select)",
+            "edge_type": "from"
+          }
+        ]
+      },
+      "compiled_sql": {
+        "(final select)": "select customer_id, count(*) as order_count, sum(amount) as gross_revenue from items group by 1",
+        "items": "items as (\n  select customer_id, amount from int_order_items\n)"
+      },
+      "raw_sql": "select\n  customer_id,\n  count(*) as order_count,\n  sum(amount) as gross_revenue\nfrom {{ ref('int_order_items') }}\ngroup by 1",
+      "sql_diff": {
+        "lines": [
+          {
+            "kind": "context",
+            "text": "select",
+            "emphasis": null
+          },
+          {
+            "kind": "context",
+            "text": "  customer_id,",
+            "emphasis": null
+          },
+          {
+            "kind": "context",
+            "text": "  count(*) as order_count,",
+            "emphasis": null
+          },
+          {
+            "kind": "removed",
+            "text": "  sum(amount) as revenue",
+            "emphasis": null
+          },
+          {
+            "kind": "added",
+            "text": "  sum(amount) as gross_revenue",
+            "emphasis": [
+              17,
+              23
+            ]
+          },
+          {
+            "kind": "context",
+            "text": "from {{ ref('int_order_items') }}",
+            "emphasis": null
+          },
+          {
+            "kind": "context",
+            "text": "group by 1",
+            "emphasis": null
+          }
+        ]
+      },
+      "model_yaml": {
+        "path": "models/marts/_fct_orders_tests.yml",
+        "raw": "  - name: fct_orders\n    config:\n      materialized: incremental",
+        "diff": {
+          "lines": [
+            {
+              "kind": "added",
+              "text": "  - name: fct_orders",
+              "emphasis": null
+            },
+            {
+              "kind": "added",
+              "text": "    config:",
+              "emphasis": null
+            },
+            {
+              "kind": "added",
+              "text": "      materialized: incremental",
+              "emphasis": null
+            }
+          ]
+        }
+      },
+      "tests": [
+        {
+          "id": "unit_test.shop.fct_orders.test_revenue_rollup",
+          "name": "test_revenue_rollup",
+          "target_model": "fct_orders",
+          "changed": false,
+          "defined_in": "models/marts/_fct_orders_tests.yml",
+          "authoring_yaml": "  - name: test_revenue_rollup\n    model: fct_orders\n    given:\n      - input: ref('int_order_items')\n        rows:\n          - { order_id: 1, customer_id: 7, amount: 12 }\n          - { order_id: 2, customer_id: 7, amount: 8 }\n    expect:\n      rows:\n        - { customer_id: 7, order_count: 2, gross_revenue: 20 }",
+          "given": [
+            {
+              "input": "ref('int_order_items')",
+              "bound_to_node": "items",
+              "table": {
+                "columns": [
+                  "amount",
+                  "customer_id",
+                  "order_id"
+                ],
+                "rows": [
+                  {
+                    "cells": [
+                      {
+                        "display": "12",
+                        "key": {
+                          "t": "number",
+                          "v": "12"
+                        }
+                      },
+                      {
+                        "display": "7",
+                        "key": {
+                          "t": "number",
+                          "v": "7"
+                        }
+                      },
+                      {
+                        "display": "1",
+                        "key": {
+                          "t": "number",
+                          "v": "1"
+                        }
+                      }
+                    ]
+                  },
+                  {
+                    "cells": [
+                      {
+                        "display": "8",
+                        "key": {
+                          "t": "number",
+                          "v": "8"
+                        }
+                      },
+                      {
+                        "display": "7",
+                        "key": {
+                          "t": "number",
+                          "v": "7"
+                        }
+                      },
+                      {
+                        "display": "2",
+                        "key": {
+                          "t": "number",
+                          "v": "2"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              "rows": [
+                {
+                  "amount": 12,
+                  "customer_id": 7,
+                  "order_id": 1
+                },
+                {
+                  "amount": 8,
+                  "customer_id": 7,
+                  "order_id": 2
+                }
+              ],
+              "format": "dict"
+            }
+          ],
+          "expected": {
+            "table": {
+              "columns": [
+                "customer_id",
+                "gross_revenue",
+                "order_count"
+              ],
+              "rows": [
+                {
+                  "cells": [
+                    {
+                      "display": "7",
+                      "key": {
+                        "t": "number",
+                        "v": "7"
+                      }
+                    },
+                    {
+                      "display": "20",
+                      "key": {
+                        "t": "number",
+                        "v": "20"
+                      }
+                    },
+                    {
+                      "display": "2",
+                      "key": {
+                        "t": "number",
+                        "v": "2"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "rows": [
+              {
+                "customer_id": 7,
+                "gross_revenue": 20,
+                "order_count": 2
+              }
+            ],
+            "format": "dict"
+          }
+        }
+      ],
+      "is_recursive": false,
+      "axes": {
+        "body": true,
+        "config": true,
+        "unit_test": true
+      },
+      "config_file": "models/marts/_fct_orders_tests.yml",
+      "state": "modified"
+    },
+    {
+      "name": "stg_orders",
+      "path": "models/staging/stg_orders.sql",
+      "dag": {
+        "nodes": [
+          {
+            "id": "src",
+            "role": "import"
+          },
+          {
+            "id": "(final select)",
+            "label": "stg_orders.sql",
+            "role": "final"
+          }
+        ],
+        "edges": [
+          {
+            "from": "src",
+            "to": "(final select)",
+            "edge_type": "from"
+          }
+        ]
+      },
+      "compiled_sql": {
+        "(final select)": "select * from src",
+        "src": "src as (\n  select order_id, customer_id, status, amount\n  from raw_orders\n)"
+      },
+      "raw_sql": "with src as (\n  select order_id, customer_id, status, amount\n  from {{ source('raw', 'orders') }}\n)\nselect * from src",
+      "sql_diff": {
+        "lines": [
+          {
+            "kind": "context",
+            "text": "with src as (",
+            "emphasis": null
+          },
+          {
+            "kind": "removed",
+            "text": "  select order_id, customer_id, amount",
+            "emphasis": null
+          },
+          {
+            "kind": "added",
+            "text": "  select order_id, customer_id, status, amount",
+            "emphasis": [
+              32,
+              40
+            ]
+          },
+          {
+            "kind": "context",
+            "text": "  from {{ source('raw', 'orders') }}",
+            "emphasis": null
+          },
+          {
+            "kind": "context",
+            "text": ")",
+            "emphasis": null
+          },
+          {
+            "kind": "context",
+            "text": "select * from src",
+            "emphasis": null
+          }
+        ]
+      },
+      "model_yaml": {
+        "missing": "No schema file declares this model in the manifest — there is no authored models: entry to show."
+      },
+      "tests": [
+        {
+          "id": "unit_test.shop.stg_orders.test_status_kept",
+          "name": "test_status_kept",
+          "target_model": "stg_orders",
+          "changed": false,
+          "defined_in": "models/staging/_stg_orders_tests.yml",
+          "authoring_yaml": "  - name: test_status_kept\n    model: stg_orders\n    given:\n      - input: source('raw', 'orders')\n        rows:\n          - { order_id: 1, customer_id: 7, status: placed, amount: 12 }\n    expect:\n      rows:\n        - { order_id: 1, customer_id: 7, status: placed, amount: 12 }",
+          "given": [
+            {
+              "input": "source('raw', 'orders')",
+              "table": {
+                "columns": [
+                  "amount",
+                  "customer_id",
+                  "order_id",
+                  "status"
+                ],
+                "rows": [
+                  {
+                    "cells": [
+                      {
+                        "display": "12",
+                        "key": {
+                          "t": "number",
+                          "v": "12"
+                        }
+                      },
+                      {
+                        "display": "7",
+                        "key": {
+                          "t": "number",
+                          "v": "7"
+                        }
+                      },
+                      {
+                        "display": "1",
+                        "key": {
+                          "t": "number",
+                          "v": "1"
+                        }
+                      },
+                      {
+                        "display": "placed",
+                        "key": {
+                          "t": "str",
+                          "v": "placed"
+                        }
+                      }
+                    ]
+                  }
+                ]
+              },
+              "rows": [
+                {
+                  "amount": 12,
+                  "customer_id": 7,
+                  "order_id": 1,
+                  "status": "placed"
+                }
+              ],
+              "format": "dict"
+            }
+          ],
+          "expected": {
+            "table": {
+              "columns": [
+                "amount",
+                "customer_id",
+                "order_id",
+                "status"
+              ],
+              "rows": [
+                {
+                  "cells": [
+                    {
+                      "display": "12",
+                      "key": {
+                        "t": "number",
+                        "v": "12"
+                      }
+                    },
+                    {
+                      "display": "7",
+                      "key": {
+                        "t": "number",
+                        "v": "7"
+                      }
+                    },
+                    {
+                      "display": "1",
+                      "key": {
+                        "t": "number",
+                        "v": "1"
+                      }
+                    },
+                    {
+                      "display": "placed",
+                      "key": {
+                        "t": "str",
+                        "v": "placed"
+                      }
+                    }
+                  ]
+                }
+              ]
+            },
+            "rows": [
+              {
+                "amount": 12,
+                "customer_id": 7,
+                "order_id": 1,
+                "status": "placed"
+              }
+            ],
+            "format": "dict"
+          }
+        }
+      ],
+      "is_recursive": false,
+      "axes": {
+        "body": true,
+        "config": false,
+        "unit_test": true
+      },
+      "state": "modified"
+    }
+  ],
+  "pr_dag": {
+    "graph": {
+      "nodes": [
+        {
+          "id": "model.shop.fct_orders",
+          "name": "fct_orders",
+          "state": "modified",
+          "is_connector": false,
+          "lines_added": 1,
+          "lines_removed": 1
+        },
+        {
+          "id": "model.shop.int_order_items",
+          "name": "int_order_items",
+          "state": "modified",
+          "is_connector": true,
+          "lines_added": 0,
+          "lines_removed": 0
+        },
+        {
+          "id": "model.shop.stg_orders",
+          "name": "stg_orders",
+          "state": "modified",
+          "is_connector": false,
+          "lines_added": 1,
+          "lines_removed": 1
+        }
+      ],
+      "edges": [
+        {
+          "from": "model.shop.int_order_items",
+          "to": "model.shop.fct_orders"
+        },
+        {
+          "from": "model.shop.stg_orders",
+          "to": "model.shop.int_order_items"
+        }
+      ]
+    },
+    "modified_count": 2,
+    "connector_count": 1,
+    "halo_count": 0,
+    "deleted_count": 0,
+    "collapsed": false,
+    "by_axis": {
+      "body": {
+        "graph": {
+          "nodes": [
+            {
+              "id": "model.shop.fct_orders",
+              "name": "fct_orders",
+              "state": "modified",
+              "is_connector": false,
+              "lines_added": 1,
+              "lines_removed": 1
+            },
+            {
+              "id": "model.shop.int_order_items",
+              "name": "int_order_items",
+              "state": "modified",
+              "is_connector": true,
+              "lines_added": 0,
+              "lines_removed": 0
+            },
+            {
+              "id": "model.shop.stg_orders",
+              "name": "stg_orders",
+              "state": "modified",
+              "is_connector": false,
+              "lines_added": 1,
+              "lines_removed": 1
+            }
+          ],
+          "edges": [
+            {
+              "from": "model.shop.int_order_items",
+              "to": "model.shop.fct_orders"
+            },
+            {
+              "from": "model.shop.stg_orders",
+              "to": "model.shop.int_order_items"
+            }
+          ]
+        },
+        "modified_count": 2,
+        "connector_count": 1,
+        "halo_count": 0,
+        "deleted_count": 0,
+        "collapsed": false
+      },
+      "config": {
+        "graph": {
+          "nodes": [
+            {
+              "id": "model.shop.fct_orders",
+              "name": "fct_orders",
+              "state": "modified",
+              "is_connector": false,
+              "lines_added": 1,
+              "lines_removed": 1
+            },
+            {
+              "id": "model.shop.int_order_items",
+              "name": "int_order_items",
+              "state": "modified",
+              "is_connector": false,
+              "is_halo": true,
+              "lines_added": 0,
+              "lines_removed": 0
+            }
+          ],
+          "edges": [
+            {
+              "from": "model.shop.int_order_items",
+              "to": "model.shop.fct_orders"
+            }
+          ]
+        },
+        "modified_count": 1,
+        "connector_count": 0,
+        "halo_count": 1,
+        "deleted_count": 0,
+        "collapsed": false
+      },
+      "unit_test": {
+        "graph": {
+          "nodes": [
+            {
+              "id": "model.shop.fct_orders",
+              "name": "fct_orders",
+              "state": "modified",
+              "is_connector": false,
+              "lines_added": 1,
+              "lines_removed": 1
+            },
+            {
+              "id": "model.shop.int_order_items",
+              "name": "int_order_items",
+              "state": "modified",
+              "is_connector": true,
+              "lines_added": 0,
+              "lines_removed": 0
+            },
+            {
+              "id": "model.shop.stg_orders",
+              "name": "stg_orders",
+              "state": "modified",
+              "is_connector": false,
+              "lines_added": 1,
+              "lines_removed": 1
+            }
+          ],
+          "edges": [
+            {
+              "from": "model.shop.int_order_items",
+              "to": "model.shop.fct_orders"
+            },
+            {
+              "from": "model.shop.stg_orders",
+              "to": "model.shop.int_order_items"
+            }
+          ]
+        },
+        "modified_count": 2,
+        "connector_count": 1,
+        "halo_count": 0,
+        "deleted_count": 0,
+        "collapsed": false
+      }
+    }
+  },
+  "pr_comments": {
+    "by_model": [
+      {
+        "model": "model.shop.fct_orders",
+        "model_path": "models/marts/fct_orders.sql",
+        "count": 3,
+        "threads": [
+          {
+            "model": "model.shop.fct_orders",
+            "path": "models/marts/fct_orders.sql",
+            "original_line": 9,
+            "side": "Right",
+            "within_hunk": false,
+            "resolved": false,
+            "outdated": true,
+            "comments": [
+              {
+                "author": null,
+                "body": "This grouping changed since I commented — please re-check the rollup grain."
+              }
+            ]
+          },
+          {
+            "model": "model.shop.fct_orders",
+            "path": "models/marts/fct_orders.sql",
+            "line": 4,
+            "original_line": 4,
+            "side": "Right",
+            "within_hunk": true,
+            "resolved": true,
+            "outdated": false,
+            "comments": [
+              {
+                "author": "octocat",
+                "body": "nit: `gross_revenue` reads clearer than `revenue` — thanks for the rename."
+              }
+            ]
+          },
+          {
+            "model": "model.shop.fct_orders",
+            "path": "models/marts/fct_orders.sql",
+            "line": 4,
+            "original_line": 4,
+            "side": "Left",
+            "within_hunk": true,
+            "resolved": false,
+            "outdated": false,
+            "comments": [
+              {
+                "author": "design-harness",
+                "body": "**[synthetic LEFT-side thread]** Comment on the deleted `sum(amount) as revenue` line (old-side line 4). Injected into the harness fixture ONLY, to exercise the LEFT→deletions Pierre anchor fix — it is not present in the committed golden."
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "model": "model.shop.stg_orders",
+        "model_path": "models/staging/stg_orders.sql",
+        "count": 1,
+        "threads": [
+          {
+            "model": "model.shop.stg_orders",
+            "path": "models/staging/stg_orders.sql",
+            "line": 2,
+            "original_line": 2,
+            "side": "Right",
+            "within_hunk": true,
+            "resolved": false,
+            "outdated": false,
+            "comments": [
+              {
+                "author": "octocat",
+                "body": "Adding `status` here is great — can we confirm it is non-null in the source?"
+              },
+              {
+                "author": "data-reviewer",
+                "body": "Good call. The source guarantees it, so no coalesce needed."
+              }
+            ]
+          }
+        ]
+      }
+    ],
+    "total": 4
+  }
+}

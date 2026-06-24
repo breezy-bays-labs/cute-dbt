@@ -9,6 +9,14 @@
 /coverage/
 lcov.info
 
+# JS review app (apps/review) — bun workspace artifacts. bun.lock IS committed.
+node_modules/
+apps/*/dist/
+apps/*/coverage/
+apps/*/test-results/
+apps/*/playwright-report/
+apps/*/.vite/
+
 # Mutation testing
 **/mutants.out*/
 

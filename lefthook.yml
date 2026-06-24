@@ -249,3 +249,22 @@ pre-push:
         RUSTDOCFLAGS: -D warnings
       run: cargo doc --no-deps --document-private-items --locked
       timeout: 120s
+    review-app-gates:
+      # Mirror the fast JS gates from `.github/workflows/review-app.yml`
+      # (typecheck + eslint-boundaries + dependency-cruiser + vitest), path-gated
+      # to apps/review changes. The heavier build/check-dist/e2e/crap4ts gates
+      # stay CI-only. Runs under bun (NODE_OPTIONS cleared — the env preload
+      # crashes spawned node). Skips cleanly if apps/review deps aren't installed.
+      glob: "apps/review/**"
+      run: |
+        set -euo pipefail
+        if [ ! -d apps/review/node_modules ] && [ ! -d node_modules/.bun ]; then
+          echo "review-app-gates: deps not installed (run \`bun install\`); skipping"
+          exit 0
+        fi
+        cd apps/review
+        env -u NODE_OPTIONS bun --bun tsc --noEmit
+        env -u NODE_OPTIONS bun --bun eslint .
+        env -u NODE_OPTIONS bun --bun vitest run
+        env -u NODE_OPTIONS bunx depcruise src --config .dependency-cruiser.cjs
+      timeout: 180s
