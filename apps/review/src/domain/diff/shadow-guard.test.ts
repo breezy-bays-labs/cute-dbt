@@ -44,4 +44,13 @@ describe("isInsideShadowOrEditable", () => {
     expect(isInsideShadowOrEditable([el("my-host")], ["my-host"])).toBe(true);
     expect(isInsideShadowOrEditable([el("my-host")])).toBe(false); // default list excludes it
   });
+
+  it("safely skips a null / primitive path entry (never throws)", () => {
+    // composedPath() can include the document / window / a non-object — and a
+    // defensive caller may carry a null. The guard must skip those, not throw.
+    expect(() => isInsideShadowOrEditable([null, undefined, 42, "str", el("div")])).not.toThrow();
+    expect(isInsideShadowOrEditable([null, undefined, 42, "str", el("div")])).toBe(false);
+    // a real shadow host AFTER the junk entries is still detected.
+    expect(isInsideShadowOrEditable([null, 42, shadowHost()])).toBe(true);
+  });
 });

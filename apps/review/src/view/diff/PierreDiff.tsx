@@ -161,6 +161,9 @@ export function PierreDiff({ file, shiki, reviewers = [], openAnchor, navRef }: 
     return () => {
       done = true;
       if (pending) clearTimeout(pending);
+      // also clear the ring-flash REMOVAL timer (a DIFFERENT timer than `pending`)
+      // so it can't fire on a detached/re-anchored row after unmount.
+      if (flashRef.current.t) clearTimeout(flashRef.current.t);
     };
   }, [openAnchor?.nonce, openAnchor?.line]);
 

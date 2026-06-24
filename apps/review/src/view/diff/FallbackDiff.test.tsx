@@ -49,6 +49,22 @@ describe("FallbackDiff", () => {
     expect(html).toContain("alice");
   });
 
+  it("renders ALL threads on the same line (multiple threads do not overwrite)", () => {
+    // two distinct threads anchored to the SAME new-side line (2). The fallback
+    // must render BOTH — keying a single RenderedThread per line silently dropped
+    // all but the last (gemini HIGH, the diff-cluster bug V1 consumes).
+    const first: RenderedThread = { path: "m.sql", line: 2, side: "Right", comments: [{ author: "alice", body: "first" }] };
+    const second: RenderedThread = { path: "m.sql", line: 2, side: "Right", comments: [{ author: "bob", body: "second" }] };
+    const html = render([first, second]);
+    expect(html).toContain("alice");
+    expect(html).toContain("first");
+    expect(html).toContain("bob");
+    expect(html).toContain("second");
+    // both threads mount (two comment-thread roots on the one line)
+    const count = html.split('data-testid="comment-thread"').length - 1;
+    expect(count).toBe(2);
+  });
+
   it("an empty patch degrades to an honest no-diff state", () => {
     const html = renderToStaticMarkup(<FallbackDiff path="x.sql" patch="" lang="sql" shiki="tokyo-night" threads={[]} />);
     expect(html).toContain('data-testid="fallback-no-diff"');

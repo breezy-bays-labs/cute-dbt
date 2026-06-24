@@ -175,6 +175,27 @@ describe("routeKey — rung 8: context keys", () => {
     expect(routeKey(ev({ key: "N", rawKey: "N", shiftKey: true }), { ...base, entity: "pr", view: "overview" }).action).toBeNull();
     expect(routeKey(ev({ key: "B", rawKey: "B", shiftKey: true }), { ...base, entity: "pr", view: "overview" }).action).toBeNull();
   });
+  it.each(["macros", "seeds", "else"] as const)(
+    "the review-flow verbs N / B / x do NOT claim on the non-reviewable entity %s (no false preventDefault on a dead key)",
+    (entity) => {
+      const ctx = { ...base, entity, view: "topology" as const };
+      // applyReviewFlow early-returns these on a non-models entity (V1's only
+      // reviewable entity), so claiming + preventDefault would be a dead key.
+      for (const key of ["N", "B"]) {
+        const r = routeKey(ev({ key, rawKey: key, shiftKey: true }), ctx);
+        expect(r.action, `${key} on ${entity}`).toBeNull();
+        expect(r.preventDefault, `${key} on ${entity} preventDefault`).toBe(false);
+      }
+      const rx = routeKey(ev({ key: "x" }), ctx);
+      expect(rx.action, `x on ${entity}`).toBeNull();
+      expect(rx.preventDefault, `x on ${entity} preventDefault`).toBe(false);
+    },
+  );
+  it("the review-flow verbs N / B / x stay live on Models (the reviewable entity)", () => {
+    expect(routeKey(ev({ key: "N", rawKey: "N", shiftKey: true }), base).action).toEqual({ kind: "next-unreviewed" });
+    expect(routeKey(ev({ key: "B", rawKey: "B", shiftKey: true }), base).action).toEqual({ kind: "prev-unreviewed" });
+    expect(routeKey(ev({ key: "x" }), base).action).toEqual({ kind: "mark-reviewed-advance" });
+  });
   it("n / b cycle the instance and are inert on PR", () => {
     expect(routeKey(ev({ key: "n" }), base).action).toEqual({ kind: "cycle-instance", dir: 1 });
     expect(routeKey(ev({ key: "n" }), { ...base, entity: "pr", view: "overview" }).action).toBeNull();

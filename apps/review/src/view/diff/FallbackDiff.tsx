@@ -55,10 +55,17 @@ export function FallbackDiff({
   const [sel, setSel] = useState<Selection>(emptySelection());
   const range = selectionRange(sel);
 
-  // threads keyed by their new-side line for inline mounting.
-  const threadByLine = useMemo(() => {
-    const m = new Map<number, RenderedThread>();
-    for (const t of threads) if (t.line != null && !t.outdated) m.set(t.line, t);
+  // threads keyed by their new-side line for inline mounting — a line can carry
+  // MULTIPLE threads, so each entry is the full list (never overwrite: a second
+  // thread on the same line must not silently drop the first).
+  const threadsByLine = useMemo(() => {
+    const m = new Map<number, RenderedThread[]>();
+    for (const t of threads) {
+      if (t.line == null || t.outdated) continue;
+      const list = m.get(t.line);
+      if (list) list.push(t);
+      else m.set(t.line, [t]);
+    }
     return m;
   }, [threads]);
 
@@ -87,7 +94,7 @@ export function FallbackDiff({
                 {enrichedRows(h).map((r, ri) => {
                   const commentable = r.t !== "del" && r.newNo != null;
                   const line = r.newNo;
-                  const thread = line != null ? threadByLine.get(line) : undefined;
+                  const lineThreads = line != null ? threadsByLine.get(line) : undefined;
                   const showComposer = range != null && line != null && range.end === line;
                   return (
                     <React.Fragment key={ri}>
@@ -117,10 +124,19 @@ export function FallbackDiff({
                           <ShikiLine line={r.s} lang={codeLang} shiki={shiki} emph={r.emph} emphCls={r.t === "del" ? "diff-word-del" : "diff-word-add"} />
                         </td>
                       </tr>
-                      {(thread || showComposer) && (
+                      {((lineThreads && lineThreads.length > 0) || showComposer) && (
                         <tr>
                           <td colSpan={4}>
-                            {thread && <CommentThread thread={thread} shiki={shiki} lang={codeLang} reviewers={reviewers} snippet={r.s} />}
+                            {lineThreads?.map((thread, ti) => (
+                              <CommentThread
+                                key={`${line}-${ti}`}
+                                thread={thread}
+                                shiki={shiki}
+                                lang={codeLang}
+                                reviewers={reviewers}
+                                snippet={r.s}
+                              />
+                            ))}
                             {showComposer && (
                               <div className="my-1 ml-2 mr-2 rounded-r border-l-2 border-sky-500 bg-sky-500/5">
                                 <div className="px-3 pt-2 font-mono text-[11px] text-zinc-400">

@@ -214,6 +214,13 @@ function rungViewKeys(ev: KeyEventLike, st: DispatchInput): DispatchResult | nul
 /** rung 8: the surface-scoped context keys (instance cycle, mode, panel, …). */
 function rungContextKeys(k: string, st: DispatchInput): DispatchResult | null {
   const notPr = st.entity !== "pr";
+  // the review LOOP verbs (mark-reviewed-advance + next/prev-unreviewed) are
+  // Models-scoped in V1 — applyReviewFlow early-returns on any other entity. Gate
+  // them on the reviewable entity so they FALL THROUGH (no false preventDefault on
+  // a dead key) on macros/seeds/else, where the handler does nothing. (n/b stay on
+  // `notPr`: the generic instance cycle whose other-entity lists land with their
+  // slices — it is not a Models-only review verb.)
+  const reviewable = st.entity === "models";
   // the KbContext the keymap surface-predicates evaluate against (the SSOT — the
   // dispatcher never re-expresses inThreads/isCodeDiff; it imports them).
   const kbCtx: KbContext = { entity: st.entity, view: st.view, codeMode: st.codeMode };
@@ -221,9 +228,9 @@ function rungContextKeys(k: string, st: DispatchInput): DispatchResult | null {
   // UNREVIEWED review-flow jumps (council MUST-FIX D — the registry's def N/B).
   if (notPr && k === "n") return claim({ kind: "cycle-instance", dir: 1 });
   if (notPr && k === "b") return claim({ kind: "cycle-instance", dir: -1 });
-  if (notPr && k === "N") return claim({ kind: "next-unreviewed" });
-  if (notPr && k === "B") return claim({ kind: "prev-unreviewed" });
-  if (notPr && k === "x") return claim({ kind: "mark-reviewed-advance" });
+  if (reviewable && k === "N") return claim({ kind: "next-unreviewed" });
+  if (reviewable && k === "B") return claim({ kind: "prev-unreviewed" });
+  if (reviewable && k === "x") return claim({ kind: "mark-reviewed-advance" });
   // ⇧R — the keyboard-resolve flow verb. Live only in a thread surface (the
   // topology shelf or the Models code diff) per the registry's `resolve` `when`.
   if (k === "R" && inThreads(kbCtx)) return claim({ kind: "resolve-from-keyboard" });
