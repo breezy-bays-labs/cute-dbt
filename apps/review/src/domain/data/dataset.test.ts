@@ -6,8 +6,9 @@ import { loadFixture, rawFixture } from "../../data/fixtures";
 import { parseContext } from "../schema";
 import type { ContextData, FindingPayload } from "../context-data";
 import {
-  blockDiffToHunks, blockDiffToPatch, buildDataset, buildSeedRecords, dagToCte, findingsToCoverage,
-  pierreSide, prDagToScope, schemaOf, sourceToContextPatch, stateToChange, threadsByPath,
+  availableScopeAxes, blockDiffToHunks, blockDiffToPatch, buildDataset, buildSeedRecords, dagToCte, findingsToCoverage,
+  pickScopeAxis, pierreSide, prDagToScope, schemaOf, scopeToGraph, sourceToContextPatch, stateToChange, threadsByPath,
+  type PrScope,
 } from "./dataset";
 
 const ctx440 = (): ContextData => loadFixture("context.440") as unknown as ContextData;
@@ -128,6 +129,69 @@ describe("prDagToScope", () => {
     expect(sc.data.nodes.find((n) => n.id === "s")!.context).toBe(true);
     expect(sc.data.nodes.find((n) => n.id === "x")!.kind).toBe("model");
     expect(sc.data.nodes.find((n) => n.id === "s")!.kind).toBe("seed");
+  });
+});
+
+describe("the 3-axis scope selection (S4 engine harness)", () => {
+  const mk = (n: number): PrScope => ({
+    data: { nodes: Array.from({ length: n }, (_, i) => ({ id: "n" + i, label: "n" + i, sub: "", tone: "modified", kind: "model" as const, change: "modified", context: false, mat: null })), edges: [] },
+    selectable: Array.from({ length: n }, (_, i) => "n" + i),
+    counts: {},
+  });
+
+  it("pickScopeAxis returns the requested axis when present", () => {
+    const byAxis = { all: mk(5), body: mk(3), config: mk(2), unit_test: mk(4) };
+    expect(pickScopeAxis(byAxis, "body")!.data.nodes.length).toBe(3);
+    expect(pickScopeAxis(byAxis, "unit_test")!.data.nodes.length).toBe(4);
+    expect(pickScopeAxis(byAxis, "all")!.data.nodes.length).toBe(5);
+  });
+
+  it("pickScopeAxis degrades to `all` when the requested axis is absent (honest, no fabrication)", () => {
+    const byAxis = { all: mk(5) };
+    expect(pickScopeAxis(byAxis, "body")!.data.nodes.length).toBe(5);
+    expect(pickScopeAxis(byAxis, "config")).toBe(byAxis.all);
+  });
+
+  it("pickScopeAxis is null when nothing is present", () => {
+    expect(pickScopeAxis({}, "all")).toBeNull();
+  });
+
+  it("availableScopeAxes lists only emitted axes, `all` leading", () => {
+    expect(availableScopeAxes({ all: mk(1), body: mk(1) })).toEqual(["all", "body"]);
+    expect(availableScopeAxes({ all: mk(1) })).toEqual(["all"]);
+    expect(availableScopeAxes({})).toEqual([]);
+  });
+
+  it("on the real fixture, the three axes select DISTINCT subgraphs (the toggle swaps the graph)", () => {
+    const ds = buildDataset(ctx440());
+    const all = pickScopeAxis(ds.prScopeByAxis, "all")!.data.nodes.length;
+    const body = pickScopeAxis(ds.prScopeByAxis, "body")!.data.nodes.length;
+    const unit = pickScopeAxis(ds.prScopeByAxis, "unit_test")!.data.nodes.length;
+    expect(all).toBeGreaterThan(0);
+    // the fixture's axes carry different node counts (a real subgraph swap).
+    expect(new Set([all, body, unit]).size).toBeGreaterThan(1);
+  });
+});
+
+describe("scopeToGraph — ScopeNode POD → shared engine GraphData", () => {
+  it("carries kind/change/context VERBATIM and normalizes the mat glyph", () => {
+    const scope: PrScope["data"] = {
+      nodes: [
+        { id: "m", label: "m", sub: "marts", tone: "modified", kind: "model", change: "modified", context: false, mat: "incremental" },
+        { id: "s", label: "s", sub: "connector", tone: "base", kind: "seed", change: "context", context: true, mat: null },
+        { id: "x", label: "x", sub: "", tone: "added", kind: "model", change: "added", context: false, mat: "bogus" },
+      ],
+      edges: [["s", "m"], ["m", "x"]],
+    };
+    const g = scopeToGraph(scope);
+    expect(g.nodes.map((n) => n.kind)).toEqual(["model", "seed", "model"]);
+    expect(g.nodes.find((n) => n.id === "m")!.mat).toBe("incremental");
+    expect(g.nodes.find((n) => n.id === "s")!.context).toBe(true);
+    expect(g.nodes.find((n) => n.id === "x")!.mat).toBeNull(); // unrecognized mat → honest-null
+    expect(g.edges).toEqual([["s", "m"], ["m", "x"]]);
+  });
+  it("null/undefined scope → empty graph", () => {
+    expect(scopeToGraph(null)).toEqual({ nodes: [], edges: [] });
   });
 });
 

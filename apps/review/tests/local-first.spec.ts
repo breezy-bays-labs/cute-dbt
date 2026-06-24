@@ -188,6 +188,134 @@ test("an open overlay OWNS the keyboard (modal gate suppresses entity keys)", as
   await expect(page.locator('[data-testid="tab-macros"]')).toHaveAttribute("data-active", "false");
 });
 
+test("S4 DAG engine: PR-scope lineage renders via the elkjs worker (real layout, local-first) + the 3-axis toggle swaps the subgraph + the prNode nav split holds", async ({ page }) => {
+  const external = await denyExternalNetwork(page);
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (e) => consoleErrors.push("PAGEERROR: " + e.message));
+
+  // Instrument the Worker constructor BEFORE any script runs so we can prove the
+  // elk worker is kept ALIVE across re-layouts (axis toggle). Each `new Worker`
+  // bumps a page-global elk-worker counter (matched by the vite-emitted "elk"
+  // filename); a re-layout that respawned the worker would increment it.
+  await page.addInitScript(() => {
+    const w = window as unknown as { __elkWorkerCount?: number };
+    w.__elkWorkerCount = 0;
+    const NativeWorker = window.Worker;
+    class CountingWorker extends NativeWorker {
+      constructor(url: string | URL, opts?: WorkerOptions) {
+        const href = typeof url === "string" ? url : url.href;
+        if (/elk/i.test(href)) w.__elkWorkerCount = (w.__elkWorkerCount ?? 0) + 1;
+        super(url, opts);
+      }
+    }
+    window.Worker = CountingWorker as unknown as typeof Worker;
+  });
+
+  await page.goto("/index.html", { waitUntil: "networkidle" });
+  await page.waitForSelector('[data-testid="entity-tabs"]');
+
+  // The Models default model is selected — capture it to prove the nav split later.
+  await page.waitForSelector('[data-testid="model-list-item"]');
+  const selectedBefore = await page
+    .locator('[data-testid="model-list-item"][data-selected="true"]')
+    .getAttribute("data-model");
+
+  // Navigate to PR → Topology (entity key "1", then the Topology view tab).
+  await page.keyboard.press("1");
+  await page.locator('[data-testid="tab-lineage"]').click();
+  await page.waitForSelector('[data-testid="pr-scope-lineage"]');
+  await page.waitForSelector('[data-testid="graph-node"]');
+
+  // ── the engine rendered through the custom node + custom edge pipeline ─────
+  const nodeCount = await page.locator('[data-testid="graph-node"]').count();
+  expect(nodeCount, "PR-scope nodes rendered").toBeGreaterThan(1);
+  await expect(page.locator('[data-testid="confidence-edge"]').first()).toBeAttached();
+
+  // ── the elkjs worker produced DISTINCT geometry (real layered layout) ──────
+  // Wait until the layered worker result lands (nodes spread across >1 x AND >1 y).
+  await expect
+    .poll(async () => {
+      const pts = await page.$$eval(".react-flow__node", (nodes) =>
+        nodes.map((n) => {
+          const t = getComputedStyle(n).transform;
+          const m = /matrix\(([^)]+)\)/.exec(t);
+          if (!m || !m[1]) return [0, 0] as [number, number];
+          const p = m[1].split(",").map((s) => parseFloat(s.trim()));
+          return [p[4] ?? 0, p[5] ?? 0] as [number, number];
+        }),
+      );
+      const xs = new Set(pts.map((p) => Math.round(p[0])));
+      const ys = new Set(pts.map((p) => Math.round(p[1])));
+      return Math.min(xs.size, ys.size);
+    }, { timeout: 8000 })
+    .toBeGreaterThan(1);
+
+  // ── the elk worker is kept ALIVE across re-layouts (the #493/#516 fix) ──────
+  // The worker laid out the geometry above, so at least one was spawned. Capture
+  // that count; toggling the axis re-runs elk.layout() on the SAME long-lived
+  // worker (no terminate+respawn), so the count must NOT increase.
+  const workersBefore = await page.evaluate(
+    () => (window as unknown as { __elkWorkerCount?: number }).__elkWorkerCount ?? 0,
+  );
+  expect(workersBefore, "the elk worker laid out the first paint").toBeGreaterThan(0);
+
+  // ── the 3-axis toggle swaps the rendered subgraph ─────────────────────────
+  await expect(page.locator('[data-testid="axis-option"][data-axis="all"]')).toHaveAttribute("data-active", "true");
+  const allNodes = await page.locator('[data-testid="graph-node"]').count();
+  await page.locator('[data-testid="axis-option"][data-axis="unit_test"]').click();
+  await expect(page.locator('[data-testid="axis-option"][data-axis="unit_test"]')).toHaveAttribute("data-active", "true");
+  // the fixture's unit_test axis carries a different node count than `all`.
+  await expect.poll(async () => page.locator('[data-testid="graph-node"]').count(), { timeout: 5000 }).not.toBe(allNodes);
+
+  // The re-layout reused the live worker — the spawn count is unchanged. (Poll
+  // briefly to let any stray async layout settle; it must never grow.)
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => (window as unknown as { __elkWorkerCount?: number }).__elkWorkerCount ?? 0),
+      { timeout: 3000 },
+    )
+    .toBe(workersBefore);
+
+  // ── the prNode-vs-sel.models NAV SPLIT: clicking a model PR node sets prNode
+  //    (the persisted PR cursor) WITHOUT changing the Models-entity selection ──
+  await page.locator('[data-testid="axis-option"][data-axis="all"]').click();
+  // wait for the `all` axis to go active BEFORE reading a node — ReactFlow swaps
+  // the graph asynchronously, so the next locator could otherwise resolve against
+  // the previous (unit_test) subgraph's nodes.
+  await expect(page.locator('[data-testid="axis-option"][data-axis="all"]')).toHaveAttribute("data-active", "true");
+  const modelNode = page.locator('[data-testid="graph-node"][data-kind="model"]').first();
+  const clickedName = await modelNode.getAttribute("data-change"); // present iff a PR node
+  expect(clickedName).not.toBeNull();
+  await modelNode.click();
+  await expect(modelNode).toHaveAttribute("data-selected", "true");
+  // the Models-entity selection is UNTOUCHED (the split): go back to Models.
+  await page.keyboard.press("2");
+  await page.waitForSelector('[data-testid="model-list-item"]');
+  const selectedAfter = await page
+    .locator('[data-testid="model-list-item"][data-selected="true"]')
+    .getAttribute("data-model");
+  expect(selectedAfter, "clicking a PR node must NOT change the Models selection").toBe(selectedBefore);
+
+  // ── KIND-BASED route-out: clicking a SEED PR node lands on the Seeds entity
+  //    (NOT Models with a bogus non-model id — the #516 false-navigation fix) ──
+  await page.keyboard.press("1"); // back to PR
+  await page.locator('[data-testid="tab-lineage"]').click();
+  await page.waitForSelector('[data-testid="pr-scope-lineage"]');
+  await page.locator('[data-testid="axis-option"][data-axis="all"]').click();
+  await expect(page.locator('[data-testid="axis-option"][data-axis="all"]')).toHaveAttribute("data-active", "true");
+  const seedNode = page.locator('[data-testid="graph-node"][data-kind="seed"]').first();
+  await expect(seedNode).toBeAttached(); // the fixture's `raw_payments` seed
+  await seedNode.click();
+  // routed OUT to the MATCHING entity (Seeds) — never Models with a seed.* id.
+  await expect(page.locator('[data-testid="tab-seeds"]')).toHaveAttribute("data-active", "true");
+  await expect(page.locator('[data-testid="tab-models"]')).toHaveAttribute("data-active", "false");
+
+  // ── zero external requests, zero page errors (local-first held throughout) ──
+  expect(external, `external requests: ${external.join(", ")}`).toEqual([]);
+  expect(consoleErrors, `page errors: ${consoleErrors.join(" | ")}`).toEqual([]);
+});
+
 test("unregistered theme fails loudly (no silent github-dark fallback)", async ({ page }) => {
   const external = await denyExternalNetwork(page);
   const pageErrors: string[] = [];

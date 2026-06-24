@@ -11,9 +11,12 @@ import { routeTarget, type View } from "../domain/matrix";
 import type { Entity } from "../domain/keymap";
 import type { ReviewContext } from "../domain/reshape";
 import type { ModelPayload } from "../domain/context-data";
+import type { PrScope, ScopeAxis } from "../domain/data/dataset";
+import type { NodeKind } from "../domain/graph-model";
 import { DiffViewer } from "./DiffViewer";
 import { LineageGraph } from "./LineageGraph";
 import { CodePane } from "./CodePane";
+import { PrScopeLineage } from "./graph/PrScopeLineage";
 
 export interface ViewRouterProps {
   entity: Entity;
@@ -27,6 +30,17 @@ export interface ViewRouterProps {
   shiki: string;
   /** the active instance id (for placeholder bodies). */
   sel: string | null;
+  /** the per-axis PR-scope map (dataset.prScopeByAxis) — the PR Topology DAG. */
+  prScopeByAxis?: Record<string, PrScope | null>;
+  /** the active change-axis (single-select). */
+  scopeAxis?: ScopeAxis;
+  onScopeAxis?: (axis: ScopeAxis) => void;
+  /** the UNCONSTRAINED PR-lineage cursor (split from sel.models). */
+  prNode?: string | null;
+  onPrNode?: (id: string | null) => void;
+  /** route OUT to a seed/macro node's own entity — carries the KIND so the sink
+   *  lands on the MATCHING entity (seed → Seeds, macro → Macros). */
+  onOpenNode?: (id: string, nodeKind: NodeKind) => void;
 }
 
 /** An honest "this surface lands in a later slice" placeholder body. */
@@ -87,7 +101,21 @@ export function ViewRouter(p: ViewRouterProps): React.ReactElement {
     case "pr-overview":
       return <Placeholder label="PR · Overview" />;
     case "pr-lineage":
-      return <Placeholder label="PR · Topology" detail="PR-scope lineage DAG lands in S4." />;
+      return p.prScopeByAxis ? (
+        <div data-testid="view-pr-lineage" className="min-w-0 flex-1 space-y-4 overflow-auto p-6">
+          <h2 className="text-sm font-semibold text-zinc-300">PR-scope lineage</h2>
+          <PrScopeLineage
+            byAxis={p.prScopeByAxis}
+            axis={p.scopeAxis ?? "all"}
+            onAxis={(a) => p.onScopeAxis?.(a)}
+            prNode={p.prNode ?? null}
+            onPrNode={(id) => p.onPrNode?.(id)}
+            onOpenNode={p.onOpenNode}
+          />
+        </div>
+      ) : (
+        <Placeholder label="PR · Topology" detail="No PR-scope DAG in this context." />
+      );
     case "pr-files":
       return <Placeholder label="PR · Files" />;
     case "pr-timeline":
