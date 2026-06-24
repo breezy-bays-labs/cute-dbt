@@ -97,6 +97,8 @@ const isDraftArray = (v: unknown): v is ReviewDraft[] =>
       !!d &&
       typeof d === "object" &&
       typeof (d as ReviewDraft).path === "string" &&
+      Number.isInteger((d as ReviewDraft).line) &&
+      ((d as ReviewDraft).side === "new" || (d as ReviewDraft).side === "old") &&
       typeof (d as ReviewDraft).body === "string",
   );
 

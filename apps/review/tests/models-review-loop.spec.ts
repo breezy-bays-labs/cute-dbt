@@ -142,7 +142,7 @@ test("V1 flow-acceptance: Models reviewable end-to-end, KEYBOARD-ONLY (network-d
   const wr = page.getByTestId("write-review");
   await expect(wr).toBeVisible();
   // a runnable gh command targeting the real repo + PR (parsed from the context).
-  const ghCmd = (await wr.getByTestId("write-review-gh-command").textContent()) ?? "";
+  const ghCmd = ((await wr.getByTestId("write-review-gh-command").textContent()) ?? "").trim();
   expect(ghCmd).toMatch(/^gh api repos\/[^/]+\/[^/]+\/pulls\/\d+\/reviews --method POST --input -$/);
   // the copy-JSON carries the drafted comment (the host runs it; cute-dbt does not).
   const json = await wr.getByTestId("write-review-json").inputValue();

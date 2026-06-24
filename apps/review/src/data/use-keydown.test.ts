@@ -230,6 +230,21 @@ describe("applyDispatch — V1 review-flow handlers", () => {
     expect(useAppStore.getState().review.resolved[`${withThread}@${line}`]).toBeUndefined();
   });
 
+  it("resolve-from-keyboard and step-hunk no-op outside Models (the entity guard, cute-dbt#522)", () => {
+    setupModels();
+    // leave Models for a non-reviewable entity; a stale sel.models remains, but the
+    // review verbs must NOT act on it (a direct dispatch must match applyReviewFlow's
+    // own Models-only contract — not resolve a thread / move the hunk cursor off-Models).
+    useAppStore.getState().setEntity("pr");
+    const hunk0 = useAppStore.getState().hunkCursor;
+    const resolved0 = useAppStore.getState().review.resolved;
+    applyDispatch({ kind: "step-hunk", dir: 1 });
+    applyDispatch({ kind: "resolve-from-keyboard" });
+    const st = useAppStore.getState();
+    expect(st.hunkCursor).toEqual(hunk0); // step-hunk guarded outside Models
+    expect(st.review.resolved).toEqual(resolved0); // resolve-from-keyboard guarded
+  });
+
   it("cycle-instance walks the in-scope model list (wraps)", () => {
     const { scope, first } = setupModels();
     applyDispatch({ kind: "cycle-instance", dir: 1 });

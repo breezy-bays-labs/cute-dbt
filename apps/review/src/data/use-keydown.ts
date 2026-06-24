@@ -152,10 +152,12 @@ export function applyReviewFlow(st: AppState, action: ReviewFlowAction): void {
       advanceTo(st, prevUnreviewed(st.review, reviewScope(st), st.sel.models));
       return;
     case "resolve-from-keyboard":
+      if (st.entity !== "models") return;
       // the ⇧R keyboard-resolve verb: toggle the focused thread's resolved state.
       resolveFocusedThread(st);
       return;
     case "step-hunk":
+      if (st.entity !== "models") return;
       // step the running hunk cursor over the active model's change-run anchors
       // (the S5 next/prev-hunk deferral V1 owns). Empty/absent patch → no-op.
       st.stepHunkCursor(activeAnchors(st), action.dir);
