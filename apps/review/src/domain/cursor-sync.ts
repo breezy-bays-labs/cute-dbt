@@ -206,21 +206,47 @@ export function innermostSpan(spans: Record<string, LineSpan>, line: number | nu
   return best;
 }
 
-/** Forward lookup: the compiled span for a node id, or null (never fabricates).
- *  A null id or an id absent from the table (e.g. an incremental-only node with
- *  no compiled span) is an honest null — the caller treats it as a no-op. */
-export function spanForNode(maps: SyncMaps, id: string | null): LineSpan | null {
-  // tracked: cute-dbt#517 — equivalent: a falsy `id` indexes `nodeSpans[id]` to
+/** The span table the forward sync resolves over, by SIDE: the compiled-pane
+ *  `nodeSpans` on the compiled shelf, the raw-pane `rawNodeSpans` on the raw shelf.
+ *  A raw-only DAG node (a `zone:N` collapsed {% for %} or the synthesized
+ *  `(final select)`) has NO compiled span but DOES have a raw span — so a forward
+ *  sync on the raw shelf must resolve against `rawNodeSpans`, not `nodeSpans`,
+ *  or the scroll/flash is a silent no-op (cute-dbt#497 finding 1). */
+function sideTable(maps: SyncMaps, side: CodeSide): Record<string, LineSpan> {
+  return side === "raw" ? maps.rawNodeSpans ?? {} : maps.nodeSpans;
+}
+
+/** Forward lookup: the span for a node id in the active SIDE's table, or null
+ *  (never fabricates). Compiled side ⇒ `nodeSpans`; raw side ⇒ `rawNodeSpans`. A
+ *  null id, or an id absent from that side's table (e.g. an incremental-only node
+ *  with no compiled span, OR — on the compiled side — a raw-only `zone:N`/
+ *  `(final select)` node), is an honest null — the caller treats it as a no-op.
+ *  `side` defaults to "compiled" so the historical compiled-only callers are
+ *  source-compatible. */
+// tracked: cute-dbt#517 — equivalent: the `side` default `"compiled"`→`""` mutant.
+// `side` is observed ONLY through `sideTable`, which branches on `=== "raw"`; any
+// non-"raw" string (incl. "") selects the SAME compiled `nodeSpans` table, so the
+// default value is behaviorally indistinguishable from "compiled". (The live `"raw"`
+// literal in sideTable IS killed by the raw-side resolution tests.)
+// Stryker disable next-line StringLiteral
+export function spanForNode(maps: SyncMaps, id: string | null, side: CodeSide = "compiled"): LineSpan | null {
+  // tracked: cute-dbt#517 — equivalent: a falsy `id` indexes the side table to
   // `undefined`, which the `?? null` already maps to `null`; dropping this guard
   // yields the identical result. A clarity short-circuit, not a behavioral branch.
   // Stryker disable next-line ConditionalExpression
   if (!id) return null;
-  return maps.nodeSpans[id] ?? null;
+  return sideTable(maps, side)[id] ?? null;
 }
 
-/** Compiled reverse resolution: a compiled line → its innermost DAG node (or null). */
-export function nodeForLine(maps: SyncMaps, line: number | null): string | null {
-  return innermostSpan(maps.nodeSpans, line);
+/** Compiled reverse resolution: a compiled line → its innermost DAG node (or null).
+ *  `side` selects the table (compiled `nodeSpans` vs raw `rawNodeSpans`); it
+ *  defaults to "compiled" so the historical compiled-only callers are unchanged. */
+// tracked: cute-dbt#517 — equivalent: the `side` default `"compiled"`→`""` mutant —
+// observed only via `sideTable`'s `=== "raw"` test, so "" and "compiled" pick the
+// same compiled table (see spanForNode above).
+// Stryker disable next-line StringLiteral
+export function nodeForLine(maps: SyncMaps, line: number | null, side: CodeSide = "compiled"): string | null {
+  return innermostSpan(sideTable(maps, side), line);
 }
 
 /**
@@ -347,15 +373,19 @@ export function inSpanCursor(cursor: number | null, sp: LineSpan): number | null
  * (innermost-span-wins) is UNCHANGED — only forward's landing line is made
  * round-trip-stable.
  */
-export function forwardSnapTarget(maps: SyncMaps, node: string, sp: LineSpan): number {
+// tracked: cute-dbt#517 — equivalent: the `side` default `"compiled"`→`""` mutant —
+// `side` is threaded only into `nodeForLine`→`sideTable` (`=== "raw"`), so "" and
+// "compiled" resolve against the same compiled table (see spanForNode above).
+// Stryker disable next-line StringLiteral
+export function forwardSnapTarget(maps: SyncMaps, node: string, sp: LineSpan, side: CodeSide = "compiled"): number {
   // tracked: cute-dbt#517 — equivalent: this early return is a clarity/perf
   // short-circuit for the common case. The loop below starts at `sp.start.line`, so
   // when the start resolves to `node` the loop's FIRST iteration returns it too —
   // dropping this guard yields the identical result. Not an observable branch.
   // Stryker disable next-line ConditionalExpression
-  if (nodeForLine(maps, sp.start.line) === node) return sp.start.line;
+  if (nodeForLine(maps, sp.start.line, side) === node) return sp.start.line;
   for (let line = sp.start.line; line <= sp.end.line; line++) {
-    if (nodeForLine(maps, line) === node) return line;
+    if (nodeForLine(maps, line, side) === node) return line;
   }
   return sp.start.line; // wholly shadowed → honest fallback (genuine ambiguity)
 }
@@ -375,14 +405,23 @@ export function forwardSnapTarget(maps: SyncMaps, node: string, sp: LineSpan): n
  *     `lastScrolledRef` guard) — re-running with the same node is idempotent.
  * The whole transition collapses to `===` when nothing changed (anti-loop).
  */
-export function syncForward(s: SyncState, maps: SyncMaps): SyncState {
+// tracked: cute-dbt#517 — equivalent: the `side` default `"compiled"`→`""` mutant —
+// `side` is threaded into `spanForNode`/`forwardSnapTarget`→`sideTable` (`=== "raw"`),
+// so "" and "compiled" both select the compiled table (see spanForNode above).
+// Stryker disable next-line StringLiteral
+export function syncForward(s: SyncState, maps: SyncMaps, side: CodeSide = "compiled"): SyncState {
   // tracked: cute-dbt#517 — equivalent: with `s.node` null/empty,
   // `spanForNode(maps, null)` returns null and the next `if (!sp) return s` fires
   // → the same `s`. A clarity short-circuit, not an observable branch.
   // Stryker disable next-line ConditionalExpression
   if (!s.node) return s; // a zone (or nothing) is selected → forward sync is a no-op
-  const sp = spanForNode(maps, s.node);
-  if (!sp) return s; // no compiled span (incremental-only) → honest no-op
+  // resolve the span against the ACTIVE SIDE's table: compiled `nodeSpans` on the
+  // compiled shelf, raw `rawNodeSpans` on the raw shelf — so a raw-only DAG node
+  // (a `zone:N` collapsed {% for %} or the synthesized `(final select)`, both
+  // ABSENT from `nodeSpans`) scrolls + ring-flashes the raw pane instead of being a
+  // silent no-op (cute-dbt#497 finding 1).
+  const sp = spanForNode(maps, s.node, side);
+  if (!sp) return s; // no span on this side (incremental-only / raw-only mismatch) → honest no-op
   // The cursor stays put only when it is INSIDE the node's span; otherwise it snaps
   // to a span line that reverse-resolves to THIS node (the prototype's
   // `c >= start && c <= end ? c : start` bail, hardened against shared-start nesting).
@@ -390,7 +429,7 @@ export function syncForward(s: SyncState, maps: SyncMaps): SyncState {
   // boundary mutant (killed by a real "cursor past end snaps back" test) from the
   // `>= start` equivalent it suppresses internally.
   const kept = inSpanCursor(s.cursor, sp);
-  const nextCursor = kept ?? forwardSnapTarget(maps, s.node, sp);
+  const nextCursor = kept ?? forwardSnapTarget(maps, s.node, sp, side);
   const fresh = s.lastScrolled !== s.node;
   if (nextCursor === s.cursor && !fresh) return s; // cursor unchanged + already scrolled → identity
   return {

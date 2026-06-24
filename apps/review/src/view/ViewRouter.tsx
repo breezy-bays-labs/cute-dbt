@@ -18,6 +18,7 @@ import { LineageGraph } from "./LineageGraph";
 import { CodePane } from "./CodePane";
 import { PrScopeLineage } from "./graph/PrScopeLineage";
 import { ModelReviewSurface } from "./review/ModelReviewSurface";
+import { TopologyPanes } from "./topology/TopologyPanes";
 
 export interface ViewRouterProps {
   entity: Entity;
@@ -100,6 +101,17 @@ export function ViewRouter(p: ViewRouterProps): React.ReactElement {
             <section data-testid="code-section" className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
               <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">Compiled SQL (Shiki)</div>
               <CodePane code={p.compiledSql} lang="sql" shiki={p.shiki} />
+            </section>
+          )}
+          {/* S6b — the topology panes: the compiled/raw CTE DAG ⇄ code panes wired
+              through the pure S6a cursor-sync machine (forward node-click→scroll,
+              reverse cursor→node-highlight). Honest-empty when no code_map. */}
+          {p.model && (
+            <section data-testid="topology-section" className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
+              <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">
+                Topology (CTE DAG ⇄ code · cursor sync)
+              </div>
+              <TopologyPanes model={p.model} shiki={p.shiki} />
             </section>
           )}
         </div>

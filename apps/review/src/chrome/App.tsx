@@ -152,6 +152,11 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   // `.toLowerCase()` on each, so a non-string candidate would throw.
   const reviewers = useMemo(() => mentionCandidates(context), [context]);
 
+  // ── PR reviewers (the comment composer's @-mention picker source) ──────────
+  // Login STRINGS only (author + reviewer logins, deduped) — the picker calls
+  // `.toLowerCase()` on each, so a non-string candidate would throw.
+  const reviewers = useMemo(() => mentionCandidates(context), [context]);
+
   const compiledSql = useMemo(() => {
     if (!model) return "";
     return model.dag.nodes
