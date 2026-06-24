@@ -4691,7 +4691,7 @@ fn payload_json_for_html_script(payload: &ReportPayload) -> Result<String, serde
 ///
 /// Wraps the run's [`ReportPayload`] — the SSOT the inlined `report.html`
 /// blob serializes — in the domain's
-/// [`ContextEnvelope`](crate::domain::ContextEnvelope), prepending the
+/// [`ContextEnvelope`], prepending the
 /// `metadata.schema_version` header (the stability anchor the TS Zod
 /// drift-gate pins to). The wrapped `data` sub-tree is **byte-identical** to
 /// the inlined HTML payload, so the report stays byte-stable.
