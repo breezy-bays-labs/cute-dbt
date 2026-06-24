@@ -15,6 +15,7 @@ import { deriveView } from "../data/nav-slice";
 import { buildContexts, mentionCandidates } from "../domain/reshape";
 import { buildDataset, type ScopeAxis } from "../domain/data/dataset";
 import { buildPrOverview, buildPrFiles, buildCommentTimeline, prTimelineFeed } from "../domain/pr-page";
+import { buildMacroViews, buildSeedViews, buildManifestIndex, testInventory } from "../domain/entity-views";
 import { shikiName, ensureHighlighter, type AppTheme } from "../domain/highlighter";
 import type { ContextData } from "../domain/context-data";
 import { ENTITY_NOUN } from "../domain/matrix";
@@ -45,6 +46,11 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   const prFiles = useMemo(() => buildPrFiles(context), [context]);
   const prTimeline = useMemo(() => buildCommentTimeline(context), [context]);
   const prFeed = useMemo(() => prTimelineFeed(context), [context]);
+  // ── S8 entity-review aggregation (Macros / Seeds / Else — pure folds) ──────
+  const macroViews = useMemo(() => buildMacroViews(context), [context]);
+  const seedViews = useMemo(() => buildSeedViews(context), [context]);
+  const manifestIndex = useMemo(() => buildManifestIndex(context), [context]);
+  const testInv = useMemo(() => testInventory(context), [context]);
 
   // ── store subscriptions (the chrome owns them) ───────────────────────────
   const entity = useAppStore((s) => s.entity);
@@ -150,8 +156,15 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   const ctx = contexts.find((c) => c.name === activeName) ?? contexts[0];
   const shiki = shikiName(settings.theme as AppTheme);
 
-  // ── instance list per entity (S2: the in-scope models; others stubbed) ─────
-  const instances: readonly string[] = entity === "models" ? reviewScopeModels : [];
+  // ── instance list per entity ──────────────────────────────────────────────
+  // Models → the in-scope review set; Macros → the macro_lens names; Seeds → the
+  // seed_cards names; Else → no per-instance selector (a single project surface).
+  const instances: readonly string[] = useMemo(() => {
+    if (entity === "models") return reviewScopeModels;
+    if (entity === "macros") return macroViews.map((m) => m.name);
+    if (entity === "seeds") return seedViews.map((s) => s.name);
+    return [];
+  }, [entity, reviewScopeModels, macroViews, seedViews]);
 
   // ── PR reviewers (the comment composer's @-mention picker source) ──────────
   // Login STRINGS only (author + reviewer logins, deduped) — the picker calls
@@ -360,6 +373,11 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
               if (activeName != null) addReviewDraft(activeName, d);
             }}
             onMarkReviewed={onMarkReviewed}
+            // ── S8 entity-review props (Macros / Seeds / Else surfaces) ──────
+            macros={macroViews}
+            seeds={seedViews}
+            manifestIndex={manifestIndex}
+            testInventory={testInv}
             // ── S9 PR-page props (overview / files / comment timeline) ───────
             prOverview={prOverview}
             prFiles={prFiles}
