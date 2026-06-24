@@ -25,6 +25,10 @@ export const keyOf = (node: string | null | undefined, col: string): string =>
   (node == null ? "?" : node) + SEP + col;
 export const splitKey = (k: string): { node: string; column: string } => {
   const i = k.indexOf(SEP);
+  // a well-formed key always carries the SEP (keyOf inserts it). Guard a SEP-less key
+  // (e.g. a raw external call) so `slice(0, -1)` can't silently lop off the last char:
+  // treat the whole string as the column under an empty node. (gemini-code-assist, #515)
+  if (i < 0) return { node: "", column: k };
   return { node: k.slice(0, i), column: k.slice(i + 1) };
 };
 
@@ -48,7 +52,10 @@ export interface ColSource {
  */
 export function buildColLineage(cl: ColumnLineage | null | undefined): Record<string, ColSource[]> | null {
   if (!cl || !cl.edges || !cl.edges.length) return null;
-  const byOut: Record<string, ColSource[]> = {};
+  // null-proto map: the keys are untrusted column names from the manifest, so a stray
+  // `__proto__`/`constructor` column can't pollute the chain (matches the raw-spans
+  // null-proto posture). (gemini-code-assist, #515)
+  const byOut: Record<string, ColSource[]> = Object.create(null) as Record<string, ColSource[]>;
   cl.edges.forEach((e) => {
     const out = e.to_col && e.to_col.column;
     if (!out) return;
@@ -152,11 +159,20 @@ export function buildColGraph(
     (inAdj[tk] = inAdj[tk] ?? []).push({ k: fk, e });
   });
   const rootK = keyOf(root.node, root.column);
+  // tracked: cute-dbt#514 — equivalent: when rootK IS in the edge set, info[rootK]
+  // was already set from that edge's from/to ref, whose {node,column} equals
+  // {root.node,root.column} (rootK is keyOf(root.node,root.column)). So the always-
+  // backfill mutant overwrites with an IDENTICAL value — no observable change.
+  // Stryker disable next-line ConditionalExpression
   if (!info[rootK]) info[rootK] = { node: root.node, column: root.column };
   const keep = new Set<string>([rootK]);
   const used: ColGraphEdge[] = [];
   const seen = new Set<string>();
   const addE = (fk: string, tk: string, e: ColEdge): void => {
+    // tracked: cute-dbt#514 — equivalent: fk/tk each embed the 0x1F SEP, so the
+    // CONCATENATION fk+tk is already an unambiguous dedup key; the ">" joiner is
+    // cosmetic (a column name can't contain 0x1F → no fk+tk collision is possible).
+    // Stryker disable next-line StringLiteral
     const id = fk + ">" + tk;
     if (seen.has(id)) return;
     seen.add(id);
@@ -164,30 +180,54 @@ export function buildColGraph(
   };
   // backward cone — every field that contributes to the root.
   let fr = [rootK];
+  // tracked: cute-dbt#514 — equivalent: `vb`/`vf` are the VISITED sets (re-queue
+  // guards), seeded with rootK only to avoid re-pushing it. On the acyclic lineage
+  // contract rootK is never its own in/out-neighbor, so seeding with [] vs [rootK]
+  // yields the identical cone (the `!vb.has(fk)` check below still dedups). A cycle
+  // would diverge, but valid column lineage is a DAG — no cycle reaches here.
+  // Stryker disable next-line ArrayDeclaration
   const vb = new Set([rootK]);
   while (fr.length) {
     const k = fr.pop() as string;
     (inAdj[k] ?? []).forEach(({ k: fk, e }) => {
       addE(fk, k, e); keep.add(fk);
+      // tracked: cute-dbt#514 — equivalent on the acyclic contract: the always-true
+      // mutant only re-queues already-visited nodes; addE/keep dedup ⇒ identical cone.
+      // Stryker disable next-line ConditionalExpression
       if (!vb.has(fk)) { vb.add(fk); fr.push(fk); }
     });
   }
   // forward cone — intra-model descendants down to the terminal select.
   fr = [rootK];
+  // tracked: cute-dbt#514 — equivalent (see `vb` above): the forward visited-seed.
+  // Stryker disable next-line ArrayDeclaration
   const vf = new Set([rootK]);
   while (fr.length) {
     const k = fr.pop() as string;
     (outAdj[k] ?? []).forEach(({ k: tk, e }) => {
       addE(k, tk, e); keep.add(tk);
+      // tracked: cute-dbt#514 — equivalent on the acyclic contract (see the backward
+      // arm above): the always-true mutant yields the identical forward cone.
+      // Stryker disable next-line ConditionalExpression
       if (!vf.has(tk)) { vf.add(tk); fr.push(tk); }
     });
   }
   const isImport = (k: string): boolean => !(inAdj[k] && inAdj[k].length);
   const nodes: ColGraphNode[] = [...keep].map((k) => {
+    // tracked: cute-dbt#514 — the `?? {…}` fallback is unreachable on validated input:
+    // every k in `keep` is either rootK (backfilled into info above) or an edge
+    // endpoint (info[fk]/info[tk] set in the edge loop), so info[k] is always defined.
+    // Stryker disable next-line ObjectLiteral,StringLiteral
     const c = info[k] ?? { node: "?", column: k };
     const isFinal = c.node === term;
+    // `label`/`sub`/`tone` are PRESENTATION (display text + a CSS tone class); they
+    // carry no never-a-false-claim honesty fact (the presence/confidence axes live on
+    // the edges + the consumer/provisional flags). Gated by the design-system pass.
+    // tracked: cute-dbt#514 — presentation strings, not honesty-bearing.
+    // Stryker disable next-line StringLiteral,LogicalOperator
+    const sub = isFinal ? (model || "output") : (c.node ?? "?");
     return {
-      id: k, label: c.column, sub: isFinal ? (model || "output") : (c.node ?? "?"),
+      id: k, label: c.column, sub,
       tone: isFinal ? "final" : isImport(k) ? "base" : "cte",
     };
   });
@@ -198,6 +238,10 @@ export function buildColGraph(
   if (finals.length && downstream && downstream.length) {
     downstream.forEach((m) => {
       const ck = "model" + SEP + m;
+      // `sub`/`tone` here are PRESENTATION; the honesty facts are `provisional`/
+      // `consumer` (the honest-provisional model-level claim, tested above) + the id.
+      // tracked: cute-dbt#514 — presentation strings, not honesty-bearing.
+      // Stryker disable next-line StringLiteral
       nodes.push({ id: ck, label: m, sub: "downstream model", tone: "cte", provisional: true, consumer: true });
       finals.forEach((fk) => used.push([fk, ck]));
     });

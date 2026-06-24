@@ -23,6 +23,33 @@ describe("the 0x1F key delimiter (EXACT)", () => {
     const k = keyOf("model.a", "a.b/c-d");
     expect(splitKey(k)).toEqual({ node: "model.a", column: "a.b/c-d" });
   });
+  it("splitKey on a SEP-less key returns the whole string as the column (no last-char lop)", () => {
+    // a malformed (SEP-less) key must NOT silently slice off the last char (the old
+    // slice(0, -1) bug). The whole string is the column under an empty node.
+    expect(splitKey("no_separator_here")).toEqual({ node: "", column: "no_separator_here" });
+  });
+  it("splitKey on a key with SEP at index 0 (empty node) splits normally (kills i<0 → i<=0)", () => {
+    // keyOf("", "col") puts SEP at index 0. The `i < 0` guard must let it through to
+    // the normal split (node "", column "col"). The `i <= 0` mutant would wrongly take
+    // the SEP-less branch and return the whole "\x1fcol" as the column.
+    const k = keyOf("", "col"); // SEP is at index 0
+    expect(splitKey(k)).toEqual({ node: "", column: "col" });
+  });
+});
+
+describe("buildColLineage — untrusted column-name keys can't pollute the prototype", () => {
+  it("a __proto__ output column is a real own-key, not a prototype mutation", () => {
+    const cl = { edges: [{
+      from_col: { scope: { intra: { node_id: "a" } }, column: "x" },
+      to_col: { scope: { intra: { node_id: "b" } }, column: "__proto__" },
+      kind: "pass_through", confidence: "resolved",
+    }] } as ColumnLineage;
+    const out = buildColLineage(cl)!;
+    expect(Object.keys(out)).toEqual(["__proto__"]); // an OWN key on a null-proto map
+    expect(out["__proto__"]).toHaveLength(1);
+    // the global Object prototype is untouched.
+    expect(({} as Record<string, unknown>)["polluted"]).toBeUndefined();
+  });
 });
 
 describe("buildColLineage — per-output-column source fold", () => {
@@ -229,5 +256,149 @@ describe("colTerminal — the conventional-name preference + equality (kills ===
   it("prefers `final` when present alongside another sink", () => {
     const e = buildColEdges({ edges: [edge("a", "x", "other", "w"), edge("a", "x", "final", "z")] })!;
     expect(colTerminal(e)).toBe("final");
+  });
+});
+
+// ── mutation-hardening: pin the never-a-false-claim honesty folds (cute-dbt#514) ─
+// Each test below kills a SPECIFIC surviving mutant in a confidence/terminal/cone
+// fold. A surviving mutant in this module = a presence/confidence flip the tests
+// don't catch — the load-bearing honesty contract. Comments name the line + mutator.
+
+describe("buildColEdges — the !f || !t guard (a missing from/to ref drops the edge, never a phantom)", () => {
+  it("drops an edge whose from_col ref is entirely absent (L82 !f || !t — not !f && !t)", () => {
+    // ONLY from_col is missing; to_col is a real column. The `!f || !t` (OR) guard
+    // must drop it. The `!f && !t` (AND) mutant would KEEP it (since !t is false),
+    // fabricating an edge from undefined.column — a false lineage claim.
+    const out = buildColEdges({ edges: [
+      { from_col: undefined as never, to_col: { scope: { intra: { node_id: "b" } }, column: "y" }, kind: "derived", confidence: "resolved" },
+      edge("a", "x", "b", "keep"),
+    ] } as ColumnLineage)!;
+    expect(out).toHaveLength(1);
+    expect(out[0]!.to.column).toBe("keep");
+  });
+  it("drops an edge whose to_col ref is entirely absent (symmetric OR arm)", () => {
+    const out = buildColEdges({ edges: [
+      { from_col: { scope: { intra: { node_id: "a" } }, column: "x" }, to_col: undefined as never, kind: "derived", confidence: "resolved" },
+      edge("a", "x", "b", "keep"),
+    ] } as ColumnLineage)!;
+    expect(out).toHaveLength(1);
+    expect(out[0]!.to.column).toBe("keep");
+  });
+  it("KEEPS an edge when BOTH refs are present (the guard fires on absence, not presence)", () => {
+    // pins L82 against the ConditionalExpression→false mutant (which would drop every edge).
+    const out = buildColEdges({ edges: [edge("a", "x", "b", "y")] })!;
+    expect(out).toHaveLength(1);
+  });
+});
+
+describe("colTerminal — the `(final select)` / `final` preference is LOAD-BEARING (kills L106 false/'' )", () => {
+  it("among multiple sinks, returns the conventional name even when it is NOT sinks[0]", () => {
+    // two sinks: "zzz_other" appears FIRST (from edge order), "(final select)" second.
+    // The find(...) preference must pick "(final select)" — the `false` mutant would
+    // make find() return undefined → fall to sinks[0] = "zzz_other" (a wrong terminal).
+    const e = buildColEdges({ edges: [
+      edge("a", "x", "zzz_other", "w"),
+      edge("a", "x", "(final select)", "z"),
+    ] })!;
+    expect(colTerminal(e)).toBe("(final select)");
+  });
+  it("the preference STRING is exactly '(final select)' (kills the L106 '' StringLiteral mutant)", () => {
+    // sole sink "(final select)"; the `n === ""` mutant would not match it, but find
+    // would still return undefined → sinks[0]. With a SECOND non-conventional sink
+    // ordered first, the '' mutant returns the wrong sink; the real code returns the
+    // conventional one.
+    const e = buildColEdges({ edges: [
+      edge("a", "x", "aaa_first", "w"),
+      edge("a", "x", "(final select)", "z"),
+    ] })!;
+    // real code → "(final select)"; both `false` and `""` mutants → "aaa_first".
+    expect(colTerminal(e)).not.toBe("aaa_first");
+    expect(colTerminal(e)).toBe("(final select)");
+  });
+});
+
+describe("buildColGraph — root backfill + BFS seeds + terminal/consumer folds (kills L155/167/177/197/198)", () => {
+  const edges = buildColEdges({ edges: [
+    edge("a", "c1", "b", "c2", "opaque", "derived"),
+    edge("b", "c2", "term", "out", "resolved", "pass_through"),
+  ] })!;
+
+  it("root backfill: a root ABSENT from the edge set is added as a singleton (L155 !info[rootK])", () => {
+    // the `if (!info[rootK])` guard backfills the root so it appears. The `false`/
+    // `info[rootK]` (truthy) mutants skip the backfill → the root node vanishes.
+    const g = buildColGraph(edges, [], { node: "ghost_node", column: "ghost_col" }, "m", "term");
+    expect(g.nodes.map((n) => n.id)).toEqual([keyOf("ghost_node", "ghost_col")]);
+  });
+  it("root backfill carries the EXACT {node,column} (kills the L155 {} ObjectLiteral mutant)", () => {
+    // the backfilled info drives the node's sub label (c.node) + label (c.column).
+    // The `{}` mutant backfills an empty object ⇒ sub/label fall to "?"/key, not the
+    // real node/column.
+    const g = buildColGraph(edges, [], { node: "ghost_node", column: "ghost_col" }, "m", "term");
+    const n = g.nodes[0]!;
+    expect(n.label).toBe("ghost_col"); // info.column drives the label
+    expect(n.sub).toBe("ghost_node");  // info.node drives the sub (non-terminal)
+  });
+
+  it("backward cone seed is the ROOT (L167 [rootK] not []) — sources of the terminal are reached", () => {
+    // rooting at the terminal, the backward BFS must walk a,b. The `[]` seed mutant
+    // visits nothing backward ⇒ the cone loses its upstream sources.
+    const g = buildColGraph(edges, [], { node: "term", column: "out" }, "m", "term");
+    const ids = new Set(g.nodes.map((n) => n.id));
+    expect(ids.has(keyOf("a", "c1"))).toBe(true); // only reachable BACKWARD from term
+    expect(ids.has(keyOf("b", "c2"))).toBe(true);
+  });
+  it("forward cone seed is the ROOT (L177 [rootK] not []) — descendants of an import are reached", () => {
+    // rooting at the import a, the forward BFS must walk b,term. The `[]` seed mutant
+    // visits nothing forward ⇒ the cone loses its downstream descendants.
+    const g = buildColGraph(edges, [], { node: "a", column: "c1" }, "m", "term");
+    const ids = new Set(g.nodes.map((n) => n.id));
+    expect(ids.has(keyOf("b", "c2"))).toBe(true);   // forward from a
+    expect(ids.has(keyOf("term", "out"))).toBe(true);
+  });
+
+  it("the terminal-membership filter uses === term (L197 EqualityOperator) — consumers attach ONLY to the terminal", () => {
+    // downstream consumers attach to nodes whose info.node === term. The `!== term`
+    // mutant would attach them to the NON-terminal nodes (a false downstream claim
+    // on an import/cte). Assert the consumer edge targets the terminal key.
+    const g = buildColGraph(edges, ["audit_x"], { node: "term", column: "out" }, "m", "term");
+    const consumerNode = g.nodes.find((n) => n.consumer)!;
+    const edgesToConsumer = g.edges.filter((e) => e[1] === consumerNode.id);
+    expect(edgesToConsumer).toHaveLength(1);
+    expect(edgesToConsumer[0]![0]).toBe(keyOf("term", "out")); // attached to the TERMINAL only
+  });
+  it("consumers attach ONLY when finals.length AND downstream.length (L198 && not ||)", () => {
+    // BOTH conditions true ⇒ attach.
+    const both = buildColGraph(edges, ["d1"], { node: "term", column: "out" }, "m", "term");
+    expect(both.nodes.some((n) => n.consumer)).toBe(true);
+    // downstream EMPTY (finals present) ⇒ the `&&` short-circuits ⇒ NO consumers.
+    // The `||` mutant would attach on finals.length alone (a false downstream claim
+    // when there is no downstream model).
+    const noDownstream = buildColGraph(edges, [], { node: "term", column: "out" }, "m", "term");
+    expect(noDownstream.nodes.some((n) => n.consumer)).toBe(false);
+    // finals EMPTY (root is a ghost not reaching any terminal) ⇒ no consumers even
+    // with downstream present (the `finals.length` arm of the &&).
+    const noFinals = buildColGraph(edges, ["d1"], { node: "ghost", column: "z" }, "m", "term");
+    expect(noFinals.nodes.some((n) => n.consumer)).toBe(false);
+  });
+  it("a consumer is attached for EACH downstream model (L202 forEach body not no-op)", () => {
+    const g = buildColGraph(edges, ["d1", "d2", "d3"], { node: "term", column: "out" }, "m", "term");
+    const consumers = g.nodes.filter((n) => n.consumer).map((n) => n.label).sort();
+    expect(consumers).toEqual(["d1", "d2", "d3"]);
+    // and each is wired from the terminal.
+    expect(g.edges.filter((e) => e.length === 2)).toHaveLength(3);
+  });
+
+  it("the dedup id uses the fk>tk separator so DISTINCT edges are NOT collapsed (L160 '>' not '')", () => {
+    // two DISTINCT edges (a→b and b→term). The real `fk + ">" + tk` id keeps them
+    // both; the `""` mutant makes every id "" ⇒ the seen-set drops the second edge
+    // (a silent edge loss — a missing lineage claim).
+    const g = buildColGraph(edges, [], { node: "term", column: "out" }, "m", "term");
+    const coneEdges = g.edges.filter((e) => e.length === 3);
+    expect(coneEdges).toHaveLength(2);
+    const pairs = coneEdges.map((e) => e[0] + "→" + e[1]).sort();
+    expect(pairs).toEqual([
+      keyOf("a", "c1") + "→" + keyOf("b", "c2"),
+      keyOf("b", "c2") + "→" + keyOf("term", "out"),
+    ].sort());
   });
 });

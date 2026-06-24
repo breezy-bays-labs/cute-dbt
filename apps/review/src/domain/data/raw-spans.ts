@@ -20,6 +20,11 @@
 
 import type { CodeMap, DagNode, ModelPayload, NodeRole, RawZone, SourcePos } from "../context-data";
 
+// `ROLE_TONE` + `tone()` map a node role to a CSS TONE CLASS (base/cte/final) — pure
+// PRESENTATION; no never-a-false-claim honesty fact hinges on the tone string (the
+// presence/confidence axes live on zones + edges). Gated by the design-system pass.
+// tracked: cute-dbt#514 — presentation tone strings, not honesty-bearing.
+// Stryker disable next-line ObjectLiteral,StringLiteral
 const ROLE_TONE: Record<string, string> = { import: "base", transform: "cte", final: "final" };
 
 /** A reshaped raw-DAG graph node. `id`/`label`/`sub`/`tone` are presentation;
@@ -55,6 +60,8 @@ export interface RawGraph {
 
 type DagLike = { nodes?: DagNode[]; edges?: { from: string; to: string }[] } | null | undefined;
 
+// tracked: cute-dbt#514 — presentation tone strings (see ROLE_TONE above).
+// Stryker disable next-line ArrowFunction,LogicalOperator,StringLiteral
 const tone = (role?: NodeRole): string => (role ? ROLE_TONE[role] ?? "cte" : "cte");
 
 /**
@@ -67,8 +74,15 @@ const tone = (role?: NodeRole): string => (role ? ROLE_TONE[role] ?? "cte" : "ct
 export function rawDagToGraph(dag: DagLike, codeMap: CodeMap | null | undefined): RawGraph | null {
   if (!dag || !dag.nodes || !codeMap || !codeMap.raw_dag) return null;
   let nodes: RawGraphNode[] = dag.nodes.map((n) => ({
+    // `label`/`sub`/`tone` are PRESENTATION (the `?? n.id` label fallback is a display
+    // nicety). tracked: cute-dbt#514 — presentation, not honesty-bearing.
+    // Stryker disable next-line LogicalOperator
     id: n.id, label: n.label ?? n.id, sub: n.role, tone: tone(n.role),
   }));
+  // tracked: cute-dbt#514 — equivalent: `dag.edges` is REQUIRED on a well-formed
+  // DagPayload (the compiled dag the raw graph mirrors), so the `?? []` default is
+  // unreachable on validated input.
+  // Stryker disable next-line ArrayDeclaration
   let edges: [string, string][] = (dag.edges ?? []).map((e) => [e.from, e.to]);
   const rawSpans = codeMap.raw_node_spans ?? {};
   // node_map.raw values are string[] (the generated CTE ids); normalize a stray
@@ -79,21 +93,36 @@ export function rawDagToGraph(dag: DagLike, codeMap: CodeMap | null | undefined)
     return v == null ? [] : Array.isArray(v) ? v : [v];
   };
   const finalNode = nodes.find((n) => n.sub === "final") ?? nodes[nodes.length - 1];
+  // `hasSpan` is the DEFENSIVE presence guard (a zone may omit start/end — RawZone.
+  // start/end are optional; a node SourceSpan always has them on validated input).
+  // It is split out so its presence-check mutants — equivalent on validated input —
+  // are suppressed surgically, leaving the byte-BOUNDARY logic below fully mutated.
+  // tracked: cute-dbt#514 — equivalent: the `&&` presence short-circuits collapse to
+  // a single truthiness test; on validated input start/end are present so the chain's
+  // internal &&/|| structure is unobservable. The BOUNDARY comparisons stay live.
+  // Stryker disable next-line ConditionalExpression,LogicalOperator
+  const hasSpan = (s?: { start?: SourcePos; end?: SourcePos } | null): s is { start: SourcePos; end: SourcePos } =>
+    !!(s && s.start && s.end);
   const inside = (z: RawZone, sp?: { start: SourcePos; end: SourcePos }): boolean =>
-    !!(sp && sp.start && sp.end && z.start && z.end
-      && z.start.byte >= sp.start.byte && z.end.byte <= sp.end.byte);
+    hasSpan(sp) && hasSpan(z) && z.start.byte >= sp.start.byte && z.end.byte <= sp.end.byte;
+  // tracked: cute-dbt#514 — equivalent: `raw_zones` absent ⇒ the `?? []` default; an
+  // adversarial non-array would be caught upstream by Zod. Both yield no zone work.
+  // Stryker disable next-line ArrayDeclaration
   const zones = codeMap.raw_zones ?? [];
   const strictWraps = (o: RawZone, i: RawZone): boolean =>
-    !!(o && i && o.start && o.end && i.start && i.end
+    hasSpan(o) && hasSpan(i)
       && o.start.byte <= i.start.byte && o.end.byte >= i.end.byte
-      && !(o.start.byte === i.start.byte && o.end.byte === i.end.byte));
+      && !(o.start.byte === i.start.byte && o.end.byte === i.end.byte);
 
   // raw byte span of each FINAL graph node (null-proto map: a stray `__proto__`
   // span key in untrusted input can't pollute the chain).
   const rawByte: Record<string, { s: number; e: number }> = Object.create(null) as Record<string, { s: number; e: number }>;
   for (const id of Object.keys(rawSpans)) {
     const s = rawSpans[id];
-    if (s && s.start && s.end) rawByte[id] = { s: s.start.byte, e: s.end.byte };
+    // tracked: cute-dbt#514 — equivalent: `s` is a validated SourceSpan (Zod requires
+    // start/end + line/col/byte), so the start/end presence guards are unreachable.
+    // Stryker disable next-line ConditionalExpression,LogicalOperator
+    if (hasSpan(s)) rawByte[id] = { s: s.start.byte, e: s.end.byte };
   }
 
   zones.forEach((z, zi) => {
@@ -107,11 +136,26 @@ export function rawDagToGraph(dag: DagLike, codeMap: CodeMap | null | undefined)
         .map(([a, b]): [string, string] => [gen.has(a) ? "zone:" + zi : a, gen.has(b) ? "zone:" + zi : b])
         .filter(([a, b]) => a !== b && !seen.has(a + ">" + b) && (seen.add(a + ">" + b), true));
       nodes = nodes.filter((n) => !gen.has(n.id));
+      // `label`/`sub`/`tone` on the collapsed zone node are PRESENTATION (the display
+      // name + "templated · N CTEs" caption + tone class). The HONESTY facts are
+      // `templated`/`genCount`/`presence` (the compiled_in fan-out claim, tested).
+      // tracked: cute-dbt#514 — presentation strings, not honesty-bearing.
+      // Stryker disable next-line StringLiteral
+      const zoneLabel = z.template ?? "{% for %} template";
+      // Stryker disable next-line StringLiteral
+      const zoneSub = "templated · " + generated.length + " CTEs";
+      // tracked: cute-dbt#514 — `tone: "cte"` is a presentation tone class.
+      // Stryker disable next-line StringLiteral
+      const zoneTone = "cte";
       nodes.push({
-        id: "zone:" + zi, label: z.template ?? "{% for %} template",
-        sub: "templated · " + generated.length + " CTEs", tone: "cte",
+        id: "zone:" + zi, label: zoneLabel, sub: zoneSub, tone: zoneTone,
         templated: true, genCount: generated.length, presence: z.presence,
       });
+      // tracked: cute-dbt#514 — equivalent: a collapsed for_loop zone that reached
+      // this branch always carries a start/end span (the spine pairs the node_map
+      // generated CTEs with the zone's byte span), so the presence guard is
+      // unreachable-false; the byte VALUES are honesty-bearing (membership) + tested.
+      // Stryker disable next-line ConditionalExpression,LogicalOperator
       if (z.start && z.end) rawByte["zone:" + zi] = { s: z.start.byte, e: z.end.byte };
     } else if (z.kind === "for_loop") {
       // a WRAPPER {% for %} (generates no CTE of its own): no node, no marker —
@@ -133,16 +177,39 @@ export function rawDagToGraph(dag: DagLike, codeMap: CodeMap | null | undefined)
   });
 
   // zone regions: one selectable, shaded area per {% for %} loop.
+  // tracked: cute-dbt#514 — equivalent: `i`/`o` are always present here (the caller
+  // guards `rawByte[n.id] && …` + passes a constructed `zb`), so the `i && o` presence
+  // arm is unreachable. The BOUNDARY comparisons (i.s >= o.s && i.e <= o.e) stay live.
+  // Stryker disable next-line ConditionalExpression,LogicalOperator
+  const present = (i?: { s: number; e: number }, o?: { s: number; e: number }): boolean => !!(i && o);
   const within = (i?: { s: number; e: number }, o?: { s: number; e: number }): boolean =>
-    !!(i && o && i.s >= o.s && i.e <= o.e);
+    present(i, o) && i!.s >= o!.s && i!.e <= o!.e;
   const regionZones: RawZoneRegion[] = [];
   zones.forEach((z, zi) => {
     if (z.kind !== "for_loop" || !z.start || !z.end) return;
     const zb = { s: z.start.byte, e: z.end.byte };
     const members = nodes.filter((n) => rawByte[n.id] && within(rawByte[n.id], zb)).map((n) => n.id);
-    const depth = zones.filter((o, j) => j !== zi && o.kind === "for_loop" && strictWraps(o, z)).length;
+    // the `notSelf` self-exclusion is REDUNDANT (hence suppressed in isolation): a zone
+    // never strict-wraps itself — strictWraps(z, z) is false because its L89 not-equal
+    // clause excludes an equal span, and a zone's span equals its own. Even two DISTINCT
+    // zones with an identical span don't strict-wrap each other, so dropping `j !== zi`
+    // never adds a count. Splitting it out keeps the `o.kind === "for_loop"` filter +
+    // strictWraps + the predicate-level branch LIVE + tested (only the redundant guard
+    // is suppressed). tracked: cute-dbt#514 — equivalent: redundant self-exclusion.
+    const depth = zones.filter((o, j) => {
+      // Stryker disable next-line ConditionalExpression
+      const notSelf = j !== zi;
+      return notSelf && o.kind === "for_loop" && strictWraps(o, z);
+    }).length;
+    // `label`/`template` here are PRESENTATION (the region display name + template
+    // string). tracked: cute-dbt#514 — presentation, not honesty-bearing.
+    // Stryker disable next-line StringLiteral,LogicalOperator
+    const regionLabel = z.loop ?? "for loop";
+    // tracked: cute-dbt#514 — presentation: the region's displayed template string.
+    // Stryker disable next-line LogicalOperator
+    const regionTemplate = z.template ?? null;
     regionZones.push({
-      id: "z" + zi, zi, label: z.loop ?? "for loop", template: z.template ?? null,
+      id: "z" + zi, zi, label: regionLabel, template: regionTemplate,
       startLine: z.start.line, endLine: z.end.line, depth,
       nodeId: genOf("zone:" + zi).length ? "zone:" + zi : null,
       members,
@@ -192,9 +259,17 @@ function liftRawNodeSpans(codeMap: CodeMap): Record<string, LineSpan> {
   const rns = codeMap.raw_node_spans ?? {};
   for (const id of Object.keys(rns)) {
     const s = rns[id];
+    // tracked: cute-dbt#514 — equivalent: `s` is a validated SourceSpan (Zod requires
+    // start/end + line/col/byte), so the presence guards are unreachable here.
+    // Stryker disable next-line ConditionalExpression,LogicalOperator
     if (s && s.start && s.end) out[id] = { start: { line: s.start.line }, end: { line: s.end.line } };
   }
+  // tracked: cute-dbt#514 — equivalent: `raw_zones` absent ⇒ the `?? []` default ⇒
+  // no zone work; an adversarial non-array is caught upstream by Zod.
+  // Stryker disable next-line ArrayDeclaration
   (codeMap.raw_zones ?? []).forEach((z, zi) => {
+    // the `z.kind === "for_loop"` filter IS honesty-bearing (a guard zone is not a
+    // block span) — tested in buildRawSpans; left fully mutated.
     if (z.kind === "for_loop" && z.start && z.end) {
       out["zone:" + zi] = { start: { line: z.start.line }, end: { line: z.end.line } };
     }
@@ -207,10 +282,24 @@ function liftRawNodeSpans(codeMap: CodeMap): Record<string, LineSpan> {
  * tracked: cute-dbt#510 — B3. */
 function computeFinalSpan(out: Record<string, LineSpan>, lines: string[]): LineSpan | null {
   const total = lines.length;
+  // tracked: cute-dbt#514 — equivalent: `lines` comes from String(...).split("\n"),
+  // which always yields ≥1 element (even "" → [""]), so `total` is never 0.
+  // Stryker disable next-line ConditionalExpression
   if (!total) return null;
   let lastEnd = 0;
+  // tracked: cute-dbt#514 — equivalent: `sp` (out[id]) is always defined for an id
+  // drawn from Object.keys(out); the `if (sp)` guard is unreachable-false.
+  // Stryker disable next-line ConditionalExpression
   for (const id of Object.keys(out)) { const sp = out[id]; if (sp) lastEnd = Math.max(lastEnd, sp.end.line); }
+  // tracked: cute-dbt#514 — equivalent: lastEnd is never negative; at lastEnd === 0
+  // both `> 0 ? lastEnd+1 : 1` and the `>= 0` / always-true mutants yield 1.
+  // Stryker disable next-line ConditionalExpression,EqualityOperator
   let fs = lastEnd > 0 ? lastEnd + 1 : 1;
+  // the `.trim()` blank-skip IS honesty (whitespace lines aren't the final block —
+  // tested); left live. The `?? ""` fallback is equivalent: `fs < total` keeps
+  // `lines[fs-1]` in-bounds (fs-1 ∈ [0, total-2]) so it is never undefined.
+  // tracked: cute-dbt#514 — equivalent `?? ""` fallback (in-bounds index).
+  // Stryker disable next-line StringLiteral
   while (fs < total && !(lines[fs - 1] ?? "").trim()) fs++;
   return total >= fs ? { start: { line: fs }, end: { line: total } } : null;
 }
@@ -218,6 +307,12 @@ function computeFinalSpan(out: Record<string, LineSpan>, lines: string[]): LineS
 export function buildRawSpans(m: Pick<ModelPayload, "raw_sql">, codeMap: CodeMap | null | undefined): Record<string, LineSpan> | null {
   if (!codeMap) return null;
   const out = liftRawNodeSpans(codeMap);
+  // the `m.raw_sql ?? codeMap.compiled` source-resolution arms ARE honesty (which text
+  // drives the EOF line count — tested). The final `?? ""` + the `\n$` replace arg are
+  // equivalent: both only affect a value that is then split by "\n", and neither
+  // changes the resulting LINE COUNT in any reachable case.
+  // tracked: cute-dbt#514 — equivalent terminal-fallback + replace-arg strings.
+  // Stryker disable next-line StringLiteral
   const lines = String(m.raw_sql ?? codeMap.compiled ?? "").replace(/\n$/, "").split("\n");
   if (!out["(final select)"]) {
     const fin = computeFinalSpan(out, lines);
