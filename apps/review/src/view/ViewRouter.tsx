@@ -19,6 +19,13 @@ import { CodePane } from "./CodePane";
 import { PrScopeLineage } from "./graph/PrScopeLineage";
 import { ModelReviewSurface } from "./review/ModelReviewSurface";
 import { TopologyPanes } from "./topology/TopologyPanes";
+import { PrOverview, PrFiles, PrTimeline } from "./pr/PrPage";
+import type {
+  PrOverview as PrOverviewModel,
+  PrFilesView,
+  CommentTimeline,
+  PrTimelineFeed,
+} from "../domain/pr-page";
 
 export interface ViewRouterProps {
   entity: Entity;
@@ -54,6 +61,17 @@ export interface ViewRouterProps {
   onDraft?: (draft: { path: string; line: number; side: "old" | "new"; body: string }) => void;
   /** mark the active model reviewed + advance — wired to `markReviewedAdvance`. */
   onMarkReviewed?: () => void;
+  // ── S9 PR-page props (the pr-overview / pr-files / pr-timeline surfaces) ────
+  /** the PR overview model (number/title/url + the changed-model summary). */
+  prOverview?: PrOverviewModel;
+  /** the PR files aggregation (changed files + comment counts, navigable). */
+  prFiles?: PrFilesView;
+  /** the PR comment timeline (per-model + unanchored threads, grouped). */
+  prTimeline?: CommentTimeline;
+  /** the HONEST temporal-feed state (commit/review/CI — the T2 spine gap). */
+  prFeed?: PrTimelineFeed;
+  /** open a model NAME in the Models review surface (PR files/timeline → model). */
+  onOpenModel?: (name: string) => void;
 }
 
 /** An honest "this surface lands in a later slice" placeholder body. */
@@ -140,7 +158,11 @@ export function ViewRouter(p: ViewRouterProps): React.ReactElement {
         <Placeholder label="Models · Code" detail={`Code diff for ${p.sel ?? "—"} (no context)`} />
       );
     case "pr-overview":
-      return <Placeholder label="PR · Overview" />;
+      return p.prOverview ? (
+        <PrOverview overview={p.prOverview} />
+      ) : (
+        <Placeholder label="PR · Overview" detail="No PR reference in this context." />
+      );
     case "pr-lineage":
       return p.prScopeByAxis ? (
         <div data-testid="view-pr-lineage" className="min-w-0 flex-1 space-y-4 overflow-auto p-6">
@@ -158,9 +180,17 @@ export function ViewRouter(p: ViewRouterProps): React.ReactElement {
         <Placeholder label="PR · Topology" detail="No PR-scope DAG in this context." />
       );
     case "pr-files":
-      return <Placeholder label="PR · Files" />;
+      return p.prFiles ? (
+        <PrFiles files={p.prFiles} onOpen={p.onOpenModel} />
+      ) : (
+        <Placeholder label="PR · Files" detail="No PR-scope DAG in this context." />
+      );
     case "pr-timeline":
-      return <Placeholder label="PR · Timeline" />;
+      return p.prTimeline && p.prFeed ? (
+        <PrTimeline timeline={p.prTimeline} feed={p.prFeed} onOpen={p.onOpenModel} />
+      ) : (
+        <Placeholder label="PR · Timeline" detail="No PR comments in this context." />
+      );
     case "entity-review":
       return <Placeholder label={`${target.entity} · Review`} detail={`Review pane for ${p.sel ?? "—"}`} />;
     case "not-available":
