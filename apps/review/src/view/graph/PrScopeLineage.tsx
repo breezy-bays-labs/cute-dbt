@@ -6,13 +6,17 @@
 //   • the prNode-vs-sel.models NAV SPLIT (load-bearing): clicking a PR node sets
 //     `prNode` (the UNCONSTRAINED PR cursor) and NEVER touches `sel.models`;
 //   • KIND-BASED route-out: clicking a MODEL stays on the PR DAG (sets prNode);
-//     clicking a seed/macro/deleted node routes OUT via onOpenModel (the engine
-//     supports the seed./macro. id prefixes; those nodes are hand-added in the
-//     fixture today — T2 #508/A2/A3).
+//     clicking a seed/macro node routes OUT via onOpenNode (the engine supports
+//     the seed./macro. id prefixes; those nodes are hand-added in the fixture
+//     today — T2 #508/A2/A3). The route-out carries the node KIND so the sink
+//     lands on the MATCHING entity (seed → Seeds, macro → Macros) — never a
+//     non-model id misrouted onto Models. A DELETED node (any kind) keeps the
+//     PR cursor (treated as removed — no live destination surface).
 //
 // LAYER: view (reads the data-layer PrScope folds; never recomputes them).
 import React, { useMemo } from "react";
 import { scopeToGraph, pickScopeAxis, availableScopeAxes, type PrScope, type ScopeAxis } from "../../domain/data/dataset";
+import type { NodeKind } from "../../domain/graph-model";
 import { LineageGraph } from "./LineageGraph";
 
 const AXIS_LABEL: Record<ScopeAxis, string> = { all: "All", body: "Body", config: "Config", unit_test: "Tests" };
@@ -24,14 +28,32 @@ const AXIS_LABEL: Record<ScopeAxis, string> = { all: "All", body: "Body", config
  *  the `selectableIds?: string[]` prop. */
 const EMPTY: string[] = [];
 
-/** The nav-split + kind-route decision (pure → unit-testable): a model click
- *  STAYS on the PR DAG ("pr-node": sets prNode, never sel.models); a seed/macro/
- *  deleted node ROUTES OUT ("open-model") when an onOpenModel sink exists, else
- *  it falls back to the PR cursor. */
-export type PrRoute = { kind: "pr-node"; id: string } | { kind: "open-model"; id: string };
-export function routePrSelect(id: string, nodeKind: string | undefined, canRouteOut: boolean): PrRoute {
+/** The nav-split + kind-route decision (pure → unit-testable):
+ *   • a MODEL click STAYS on the PR DAG ("pr-node": sets prNode, never sel.models);
+ *   • a DELETED node (any kind) STAYS on the PR DAG (treated as removed — there is
+ *     no live destination surface for a node the PR deleted);
+ *   • a seed/macro node ROUTES OUT ("open-node") carrying its KIND so the sink
+ *     lands on the MATCHING entity — but only when a route-out sink exists; else
+ *     it falls back to the PR cursor.
+ *  `change` is the PR change-state ("added"/"modified"/"removed"/"deleted"/
+ *  "context"); a removed/deleted node never routes out. */
+export type PrRoute =
+  | { kind: "pr-node"; id: string }
+  | { kind: "open-node"; id: string; nodeKind: NodeKind };
+export function routePrSelect(
+  id: string,
+  nodeKind: string | undefined,
+  canRouteOut: boolean,
+  change?: string,
+): PrRoute {
+  // a deleted/removed node has no live destination — keep it on the PR cursor.
+  if (change === "removed" || change === "deleted") return { kind: "pr-node", id };
+  // a model (and the unknown-kind fallback) stays on the PR DAG (the nav split).
   if (nodeKind === "model" || nodeKind === undefined) return { kind: "pr-node", id };
-  return canRouteOut ? { kind: "open-model", id } : { kind: "pr-node", id };
+  // a seed/macro routes OUT to its matching entity, carrying the kind.
+  if (canRouteOut && (nodeKind === "seed" || nodeKind === "macro"))
+    return { kind: "open-node", id, nodeKind };
+  return { kind: "pr-node", id };
 }
 
 export interface PrScopeLineageProps {
@@ -44,13 +66,14 @@ export interface PrScopeLineageProps {
   prNode: string | null;
   /** set the PR cursor — NEVER sel.models (the nav split). */
   onPrNode: (id: string | null) => void;
-  /** route OUT to a seed/macro/deleted node's own entity. */
-  onOpenModel?: (id: string) => void;
+  /** route OUT to a seed/macro node's own entity — carries the KIND so the sink
+   *  lands on the MATCHING entity (seed → Seeds, macro → Macros), never Models. */
+  onOpenNode?: (id: string, nodeKind: NodeKind) => void;
   height?: number;
 }
 
 export function PrScopeLineage(props: PrScopeLineageProps): React.ReactElement {
-  const { byAxis, axis, onAxis, prNode, onPrNode, onOpenModel, height = 420 } = props;
+  const { byAxis, axis, onAxis, prNode, onPrNode, onOpenNode, height = 420 } = props;
   const axes = useMemo(() => availableScopeAxes(byAxis), [byAxis]);
   const scope = pickScopeAxis(byAxis, axis);
   const graph = useMemo(() => scopeToGraph(scope?.data ?? null), [scope]);
@@ -58,19 +81,24 @@ export function PrScopeLineage(props: PrScopeLineageProps): React.ReactElement {
   // — a fresh `[]` each render would re-render LineageGraph + recompute rfNodes.
   const selectable = useMemo(() => scope?.selectable ?? EMPTY, [scope]);
 
-  // KIND-BASED route-out: a model click stays (sets prNode); a seed/macro/deleted
-  // node routes out (onOpenModel). The node's kind is carried on the graph node.
-  const kindById = useMemo(() => {
-    const m: Record<string, string> = Object.create(null) as Record<string, string>;
-    graph.nodes.forEach((n) => { if (n.kind) m[n.id] = n.kind; });
+  // KIND-BASED route-out: a model click stays (sets prNode); a seed/macro node
+  // routes out (onOpenNode) to its MATCHING entity; a deleted node stays. Both
+  // the node kind and change-state are carried on the graph node.
+  const factsById = useMemo(() => {
+    const m: Record<string, { kind?: string; change?: string }> = Object.create(null) as Record<
+      string,
+      { kind?: string; change?: string }
+    >;
+    graph.nodes.forEach((n) => { m[n.id] = { kind: n.kind, change: n.change }; });
     return m;
   }, [graph]);
 
   const onSelect = (id: string): void => {
-    const route = routePrSelect(id, kindById[id], !!onOpenModel);
-    // model → stay on the PR DAG (the nav split: prNode, NOT sel.models).
-    // seed/macro (and the deleted/hand-added prefixes) → route OUT.
-    if (route.kind === "open-model" && onOpenModel) onOpenModel(route.id);
+    const facts = factsById[id];
+    const route = routePrSelect(id, facts?.kind, !!onOpenNode, facts?.change);
+    // seed/macro → route OUT to the matching entity (carries the kind).
+    // model / deleted / unknown → stay on the PR DAG (prNode, NOT sel.models).
+    if (route.kind === "open-node" && onOpenNode) onOpenNode(route.id, route.nodeKind);
     else onPrNode(route.id);
   };
 

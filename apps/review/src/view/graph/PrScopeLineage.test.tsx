@@ -46,18 +46,35 @@ describe("PrScopeLineage — the 3-axis ToggleGroup", () => {
   });
 });
 
-describe("routePrSelect — the nav split + kind route-out", () => {
+describe("routePrSelect — the nav split + KIND-aware route-out", () => {
   it("a model click STAYS on the PR DAG (pr-node — sets prNode, never sel.models)", () => {
     expect(routePrSelect("customers", "model", true)).toEqual({ kind: "pr-node", id: "customers" });
   });
   it("an unknown-kind node defaults to the PR cursor (stay)", () => {
     expect(routePrSelect("x", undefined, true)).toEqual({ kind: "pr-node", id: "x" });
   });
-  it("a seed/macro/deleted node ROUTES OUT when a sink exists", () => {
-    expect(routePrSelect("raw_payments", "seed", true)).toEqual({ kind: "open-model", id: "raw_payments" });
-    expect(routePrSelect("cents_to_dollars", "macro", true)).toEqual({ kind: "open-model", id: "cents_to_dollars" });
+  it("a SEED node routes OUT carrying kind=seed (→ Seeds entity, never Models)", () => {
+    expect(routePrSelect("raw_payments", "seed", true)).toEqual({
+      kind: "open-node",
+      id: "raw_payments",
+      nodeKind: "seed",
+    });
+  });
+  it("a MACRO node routes OUT carrying kind=macro (→ Macros entity, never Models)", () => {
+    expect(routePrSelect("cents_to_dollars", "macro", true)).toEqual({
+      kind: "open-node",
+      id: "cents_to_dollars",
+      nodeKind: "macro",
+    });
   });
   it("a seed/macro falls back to the PR cursor when no route-out sink", () => {
     expect(routePrSelect("raw_payments", "seed", false)).toEqual({ kind: "pr-node", id: "raw_payments" });
+  });
+  it("a DELETED node (any kind) STAYS on the PR cursor — no live destination", () => {
+    // a deleted seed is `removed`/`deleted` change-state: it keeps the prNode
+    // selection rather than routing onto a Seeds surface for a node the PR deleted.
+    expect(routePrSelect("dropped_seed", "seed", true, "removed")).toEqual({ kind: "pr-node", id: "dropped_seed" });
+    expect(routePrSelect("dropped_macro", "macro", true, "deleted")).toEqual({ kind: "pr-node", id: "dropped_macro" });
+    expect(routePrSelect("dropped_model", "model", true, "removed")).toEqual({ kind: "pr-node", id: "dropped_model" });
   });
 });

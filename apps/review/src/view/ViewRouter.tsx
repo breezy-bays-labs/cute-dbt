@@ -12,6 +12,7 @@ import type { Entity } from "../domain/keymap";
 import type { ReviewContext } from "../domain/reshape";
 import type { ModelPayload } from "../domain/context-data";
 import type { PrScope, ScopeAxis } from "../domain/data/dataset";
+import type { NodeKind } from "../domain/graph-model";
 import { DiffViewer } from "./DiffViewer";
 import { LineageGraph } from "./LineageGraph";
 import { CodePane } from "./CodePane";
@@ -37,8 +38,9 @@ export interface ViewRouterProps {
   /** the UNCONSTRAINED PR-lineage cursor (split from sel.models). */
   prNode?: string | null;
   onPrNode?: (id: string | null) => void;
-  /** route OUT to a seed/macro node's own entity. */
-  onOpenModel?: (id: string) => void;
+  /** route OUT to a seed/macro node's own entity — carries the KIND so the sink
+   *  lands on the MATCHING entity (seed → Seeds, macro → Macros). */
+  onOpenNode?: (id: string, nodeKind: NodeKind) => void;
 }
 
 /** An honest "this surface lands in a later slice" placeholder body. */
@@ -108,7 +110,7 @@ export function ViewRouter(p: ViewRouterProps): React.ReactElement {
             onAxis={(a) => p.onScopeAxis?.(a)}
             prNode={p.prNode ?? null}
             onPrNode={(id) => p.onPrNode?.(id)}
-            onOpenModel={p.onOpenModel}
+            onOpenNode={p.onOpenNode}
           />
         </div>
       ) : (

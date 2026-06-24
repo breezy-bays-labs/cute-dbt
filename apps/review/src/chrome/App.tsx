@@ -232,10 +232,16 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
             onScopeAxis={setScopeAxis}
             prNode={prNode}
             onPrNode={setPrNode}
-            onOpenModel={(id) => {
-              // route OUT: a seed/macro/deleted PR node jumps into the Models entity.
-              setEntity("models" as Entity);
-              setSel(id, "models" as Entity);
+            onOpenNode={(id, kind) => {
+              // route OUT BY KIND: a seed/macro PR node jumps into its MATCHING
+              // entity (seed → Seeds, macro → Macros) and selects the clicked id
+              // there. NEVER misroute a non-model id onto Models with a bogus sel
+              // (the false-navigation bug); reserve Models for actual models.
+              // (Deleted nodes never reach this sink — they keep the PR cursor;
+              // see routePrSelect.)
+              const entity: Entity = kind === "seed" ? "seeds" : kind === "macro" ? "macros" : "models";
+              setEntity(entity);
+              setSel(id, entity);
             }}
           />
         </main>

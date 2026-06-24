@@ -280,6 +280,10 @@ test("S4 DAG engine: PR-scope lineage renders via the elkjs worker (real layout,
   // ── the prNode-vs-sel.models NAV SPLIT: clicking a model PR node sets prNode
   //    (the persisted PR cursor) WITHOUT changing the Models-entity selection ──
   await page.locator('[data-testid="axis-option"][data-axis="all"]').click();
+  // wait for the `all` axis to go active BEFORE reading a node — ReactFlow swaps
+  // the graph asynchronously, so the next locator could otherwise resolve against
+  // the previous (unit_test) subgraph's nodes.
+  await expect(page.locator('[data-testid="axis-option"][data-axis="all"]')).toHaveAttribute("data-active", "true");
   const modelNode = page.locator('[data-testid="graph-node"][data-kind="model"]').first();
   const clickedName = await modelNode.getAttribute("data-change"); // present iff a PR node
   expect(clickedName).not.toBeNull();
@@ -292,6 +296,20 @@ test("S4 DAG engine: PR-scope lineage renders via the elkjs worker (real layout,
     .locator('[data-testid="model-list-item"][data-selected="true"]')
     .getAttribute("data-model");
   expect(selectedAfter, "clicking a PR node must NOT change the Models selection").toBe(selectedBefore);
+
+  // ── KIND-BASED route-out: clicking a SEED PR node lands on the Seeds entity
+  //    (NOT Models with a bogus non-model id — the #516 false-navigation fix) ──
+  await page.keyboard.press("1"); // back to PR
+  await page.locator('[data-testid="tab-lineage"]').click();
+  await page.waitForSelector('[data-testid="pr-scope-lineage"]');
+  await page.locator('[data-testid="axis-option"][data-axis="all"]').click();
+  await expect(page.locator('[data-testid="axis-option"][data-axis="all"]')).toHaveAttribute("data-active", "true");
+  const seedNode = page.locator('[data-testid="graph-node"][data-kind="seed"]').first();
+  await expect(seedNode).toBeAttached(); // the fixture's `raw_payments` seed
+  await seedNode.click();
+  // routed OUT to the MATCHING entity (Seeds) — never Models with a seed.* id.
+  await expect(page.locator('[data-testid="tab-seeds"]')).toHaveAttribute("data-active", "true");
+  await expect(page.locator('[data-testid="tab-models"]')).toHaveAttribute("data-active", "false");
 
   // ── zero external requests, zero page errors (local-first held throughout) ──
   expect(external, `external requests: ${external.join(", ")}`).toEqual([]);

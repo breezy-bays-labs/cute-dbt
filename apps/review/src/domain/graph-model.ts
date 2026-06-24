@@ -80,9 +80,13 @@ export interface GraphData {
   zones?: GraphZone[];
 }
 
-/** Read an edge's honesty/structural metadata (the optional 3rd tuple element). */
+/** Read an edge's honesty/structural metadata (the optional 3rd tuple element).
+ *  `length === 3` (a literal) narrows the `[s,t] | [s,t,EdgeMeta]` union to the
+ *  3-tuple arm so `e[2]` is soundly typed as `EdgeMeta` — a `length > 2` compare
+ *  does NOT narrow a union of tuple types in TS (only an `=== literal`/discriminant
+ *  does), which would leave `e[2]` as `EdgeMeta | undefined` asserted, not proven. */
 export function edgeMeta(e: GraphEdge): EdgeMeta | undefined {
-  return e.length > 2 ? e[2] : undefined;
+  return e.length === 3 ? e[2] : undefined;
 }
 
 // ── the change-state stripe + confidence-edge vocabularies (honesty axes) ─────
