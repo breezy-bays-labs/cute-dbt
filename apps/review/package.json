@@ -20,18 +20,19 @@
   "dependencies": {
     "@pierre/diffs": "1.2.11",
     "@pierre/theming": "0.0.1",
-    "@xyflow/react": "12.11.1",
-    "elkjs": "0.11.1",
-    "react": "19.2.7",
-    "react-dom": "19.2.7",
-    "shiki": "4.2.0",
     "@shikijs/core": "4.2.0",
     "@shikijs/langs": "4.2.0",
     "@shikijs/themes": "4.2.0",
-    "zustand": "5.0.14",
-    "zod": "4.4.3",
+    "@xyflow/react": "12.11.1",
+    "elkjs": "0.11.1",
+    "immer": "10.1.3",
     "lucide-react": "1.21.0",
-    "sonner": "2.0.7"
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "shiki": "4.2.0",
+    "sonner": "2.0.7",
+    "zod": "4.4.3",
+    "zustand": "5.0.14"
   },
   "devDependencies": {
     "@playwright/test": "1.61.1",

@@ -127,6 +127,67 @@ test("Zustand persist round-trips the selected model under a cute-dbt: key", asy
   await expect(stillSelected).toHaveAttribute("data-selected", "true");
 });
 
+test("the SINGLE keydown dispatcher routes entity/view/overlay keys + persists nav", async ({ page }) => {
+  // Proves the S2 dispatch spine end-to-end against the real bundle: one
+  // capture-phase listener routes the number-row entity keys, the ⇧digit
+  // positional view keys, and an app overlay key — and the resulting nav state
+  // round-trips through the `cute-dbt:review` persist namespace (network-denied).
+  await denyExternalNetwork(page);
+  await page.goto("/index.html", { waitUntil: "networkidle" });
+  await page.waitForSelector('[data-testid="entity-tabs"]');
+
+  // default entity = Models (the entity tab is active).
+  await expect(page.locator('[data-testid="tab-models"]')).toHaveAttribute("data-active", "true");
+
+  // press "3" → Macros entity (number-row entity key, routed by the dispatcher).
+  await page.keyboard.press("3");
+  await expect(page.locator('[data-testid="tab-macros"]')).toHaveAttribute("data-active", "true");
+
+  // press "2" → back to Models.
+  await page.keyboard.press("2");
+  await expect(page.locator('[data-testid="tab-models"]')).toHaveAttribute("data-active", "true");
+
+  // press ⇧3 → the THIRD Models view (data / "Unit tests"), positional over AVAIL.
+  await page.keyboard.press("Shift+Digit3");
+  await expect(page.locator('[data-testid="tab-data"]')).toHaveAttribute("data-active", "true");
+
+  // press "s" → toggle the sidebar overlay (an app-level key).
+  await page.keyboard.press("s");
+  await expect(page.locator('[data-testid="btn-sidebar"]')).toHaveAttribute("data-active", "true");
+
+  // The nav state (entity + per-entity view) persisted under the cute-dbt: key.
+  const persisted = await page.evaluate(() => localStorage.getItem("cute-dbt:review"));
+  expect(persisted, "expected cute-dbt:review persist blob").toBeTruthy();
+  const blob = JSON.parse(persisted!) as { state: { entity: string; viewByEntity: Record<string, string>; sidebar: boolean } };
+  expect(blob.state.entity).toBe("models");
+  expect(blob.state.viewByEntity.models).toBe("data");
+  expect(blob.state.sidebar).toBe(true);
+
+  // Reload → the nav position is restored (the dispatcher routed it, persist hydrated it).
+  await page.reload({ waitUntil: "networkidle" });
+  await page.waitForSelector('[data-testid="entity-tabs"]');
+  await expect(page.locator('[data-testid="tab-data"]')).toHaveAttribute("data-active", "true");
+  await expect(page.locator('[data-testid="btn-sidebar"]')).toHaveAttribute("data-active", "true");
+});
+
+test("an open overlay OWNS the keyboard (modal gate suppresses entity keys)", async ({ page }) => {
+  await denyExternalNetwork(page);
+  await page.goto("/index.html", { waitUntil: "networkidle" });
+  await page.waitForSelector('[data-testid="entity-tabs"]');
+
+  // open the settings overlay flag via the keyboard (",").
+  await page.keyboard.press(",");
+  // the settings button reflects the open flag.
+  await expect(page.locator('[data-testid="btn-settings"]')).toBeVisible();
+
+  // while the modal flag is set, a number-row entity key must be SUPPRESSED
+  // (the modal gate hands keyboard ownership to the overlay). Models stays active.
+  const before = await page.locator('[data-testid="tab-models"]').getAttribute("data-active");
+  await page.keyboard.press("3");
+  await expect(page.locator('[data-testid="tab-models"]')).toHaveAttribute("data-active", before ?? "true");
+  await expect(page.locator('[data-testid="tab-macros"]')).toHaveAttribute("data-active", "false");
+});
+
 test("unregistered theme fails loudly (no silent github-dark fallback)", async ({ page }) => {
   const external = await denyExternalNetwork(page);
   const pageErrors: string[] = [];
