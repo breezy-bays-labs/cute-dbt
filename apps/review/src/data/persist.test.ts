@@ -27,6 +27,14 @@ describe("mergeSettings — migrate-MERGE over defaults", () => {
     expect(mergeSettings(undefined)).toEqual(SETTINGS_DEFAULTS);
     expect(mergeSettings(42)).toEqual(SETTINGS_DEFAULTS);
   });
+  it("fail-closed on an ARRAY blob → pristine defaults (typeof [] === 'object' trap)", () => {
+    // An array passes `typeof === "object"`; without the Array.isArray guard its
+    // numeric indices would spread into settings as `0`, `1`, … keys.
+    expect(mergeSettings([])).toEqual(SETTINGS_DEFAULTS);
+    expect(mergeSettings(["dracula", "compact"])).toEqual(SETTINGS_DEFAULTS);
+    // crucially: no numeric keys leaked onto the merged object.
+    expect(Object.keys(mergeSettings(["x"]))).toEqual(Object.keys(SETTINGS_DEFAULTS));
+  });
 });
 
 describe("hydrateMerge — the full persisted-blob → state merge", () => {

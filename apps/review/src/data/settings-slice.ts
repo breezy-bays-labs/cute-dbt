@@ -63,10 +63,12 @@ export const SETTINGS_DEFAULTS: Settings = {
  * Merge a persisted settings blob over the defaults — the migrate-MERGE rule.
  * Every default field is present even if the persisted blob omits it (a new
  * field appears for existing users); persisted values win where present. Drops
- * non-object input fail-closed (returns the pristine defaults).
+ * non-object input fail-closed (returns the pristine defaults). `typeof [] ===
+ * "object"` is true, so an explicit `Array.isArray` rejection keeps a persisted
+ * array (numeric keys) from being spread into the settings object.
  */
 export function mergeSettings(raw: unknown): Settings {
-  if (!raw || typeof raw !== "object") return { ...SETTINGS_DEFAULTS };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ...SETTINGS_DEFAULTS };
   return { ...SETTINGS_DEFAULTS, ...(raw as Partial<Settings>) };
 }
 

@@ -78,6 +78,20 @@ export function snapshotOf(entity: Entity, view: View, sel: Record<Entity, strin
   return JSON.stringify({ entity, view, sel });
 }
 
+/**
+ * Apply a history snapshot back into entity/viewMap/sel by MUTATING the passed
+ * immer draft `s` directly (no internal `set`). Callers (`historyBack`/
+ * `historyForward`) move the history index AND restore the snapshot inside the
+ * SAME `set`, so a subscriber never sees the broken intermediate state where the
+ * index moved but the nav state has not yet been restored (atomic back/forward).
+ */
+export function applySnap(s: NavSlice, snap: HistorySnapshot): void {
+  const o = JSON.parse(snap) as { entity: Entity; view: View; sel: Record<Entity, string | null> };
+  s.entity = o.entity;
+  s.viewMap[o.entity] = o.view;
+  s.sel = o.sel;
+}
+
 /** Zustand StateCreator-shaped setter/getter pair, narrowed to this slice's shape. */
 export type NavSliceSet = (
   partial: NavSlice | Partial<NavSlice> | ((state: NavSlice) => NavSlice | Partial<NavSlice>),
@@ -124,18 +138,6 @@ export function pushSnapshot(h: HistoryState, snap: HistorySnapshot): HistorySta
 
 /** Build the nav slice. `set`/`get` are the store's setter/getter. */
 export function createNavSlice(set: NavSliceSet, get: NavSliceGet): NavSlice {
-  // Apply a history snapshot back into entity/viewMap/sel (the back/forward body).
-  const applySnap = (snap: HistorySnapshot): void => {
-    const o = JSON.parse(snap) as { entity: Entity; view: View; sel: Record<Entity, string | null> };
-    set(
-      produce((s: NavSlice) => {
-        s.entity = o.entity;
-        s.viewMap[o.entity] = o.view;
-        s.sel = o.sel;
-      }),
-    );
-  };
-
   return {
     entity: NAV_DEFAULTS.entity,
     viewMap: { ...NAV_DEFAULTS.viewMap },
@@ -184,8 +186,13 @@ export function createNavSlice(set: NavSliceSet, get: NavSliceGet): NavSlice {
         const idx = h.idx - 1;
         const snap = h.stack[idx];
         if (snap === undefined) return;
-        set({ history: { ...h, idx } });
-        applySnap(snap);
+        // SINGLE atomic set: move the index AND restore the snapshot together.
+        set(
+          produce((s: NavSlice) => {
+            s.history.idx = idx;
+            applySnap(s, snap);
+          }),
+        );
       }
     },
 
@@ -195,8 +202,13 @@ export function createNavSlice(set: NavSliceSet, get: NavSliceGet): NavSlice {
         const idx = h.idx + 1;
         const snap = h.stack[idx];
         if (snap === undefined) return;
-        set({ history: { ...h, idx } });
-        applySnap(snap);
+        // SINGLE atomic set: move the index AND restore the snapshot together.
+        set(
+          produce((s: NavSlice) => {
+            s.history.idx = idx;
+            applySnap(s, snap);
+          }),
+        );
       }
     },
   };

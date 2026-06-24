@@ -8,6 +8,7 @@ import {
   pushSnapshot,
   deriveView,
   snapshotOf,
+  applySnap,
   createNavSlice,
   HISTORY_CAP,
   NAV_DEFAULTS,
@@ -137,5 +138,33 @@ describe("nav slice — per-entity view memory + history back/forward", () => {
     expect(snapshotOf("models", "topology", sel)).toBe(
       JSON.stringify({ entity: "models", view: "topology", sel }),
     );
+  });
+  it("applySnap mutates the passed draft directly (no internal set)", () => {
+    // The atomicity refactor: applySnap is a pure draft-mutator. Restoring a
+    // snapshot writes entity/viewMap[entity]/sel onto the SAME object.
+    const draft = createNavSlice(
+      () => {},
+      () => draft,
+    );
+    const snap = snapshotOf("pr", "lineage", { ...NAV_DEFAULTS.sel, pr: "x" });
+    applySnap(draft, snap);
+    expect(draft.entity).toBe("pr");
+    expect(draft.viewMap.pr).toBe("lineage");
+    expect(draft.sel.pr).toBe("x");
+  });
+  it("historyBack restores index AND nav state together (atomic — never a torn state)", () => {
+    const { get } = harness();
+    get().pushHistory(); // pos 0: models/topology
+    get().setEntity("pr");
+    get().setView("lineage");
+    get().pushHistory(); // pos 1: pr/lineage
+    expect(get().history.idx).toBe(1);
+
+    get().historyBack();
+    // After the single atomic set the index and the restored snapshot are
+    // mutually consistent: idx 0 ⇔ models/topology (never idx 0 with pr still set).
+    expect(get().history.idx).toBe(0);
+    expect(get().entity).toBe("models");
+    expect(deriveView(get().viewMap, "models")).toBe("topology");
   });
 });

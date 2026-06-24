@@ -38,7 +38,11 @@ export function SubHeader(p: SubHeaderProps): React.ReactElement {
     label: viewLabelFor(p.entity, v),
     hot: viewKeyFor(p.entity, v),
   }));
-  const idx = p.sel ? p.instances.indexOf(p.sel) : -1;
+  // Resolve the displayed selection FIRST: when `p.sel` is null the Select shows
+  // the first instance, so the idx indicator must count THAT (not -1 → a "0/16"
+  // that contradicts the dropdown showing item 1 selected).
+  const activeSel = p.sel ?? p.instances[0] ?? null;
+  const idx = activeSel ? p.instances.indexOf(activeSel) : -1;
   const showInstance = p.entity !== "pr" && p.instances.length > 0;
   const showCodeMode = p.entity === "models" && p.view === "code";
   const showDataMode = p.view === "data" && (p.entity === "models" || p.entity === "seeds");
@@ -62,7 +66,7 @@ export function SubHeader(p: SubHeaderProps): React.ReactElement {
           <span data-testid="instance-picker" className="inline-flex items-center gap-2">
             <Select
               testid="instance-select"
-              value={p.sel ?? p.instances[0] ?? ""}
+              value={activeSel ?? ""}
               onChange={p.onSel}
               options={p.instances}
               ariaLabel={`Select ${p.noun}`}

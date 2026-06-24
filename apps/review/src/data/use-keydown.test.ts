@@ -4,7 +4,8 @@
 // (which action a key produces) is covered by dispatch.test.ts; this file covers
 // the APPLY side (no DOM needed — applyDispatch reads getState() directly).
 import { describe, it, expect, beforeEach } from "vitest";
-import { applyDispatch } from "./use-keydown";
+import { applyDispatch, keyTarget } from "./use-keydown";
+import { routeKey, type KeyEventLike, type DispatchInput } from "../domain/dispatch";
 import { useAppStore } from "./store";
 import { NAV_DEFAULTS, UI_DEFAULTS } from "./store";
 
@@ -62,6 +63,79 @@ describe("applyDispatch — nav actions", () => {
     expect(useAppStore.getState().entity).toBe("models");
     applyDispatch({ kind: "history-forward" });
     expect(useAppStore.getState().entity).toBe("pr");
+  });
+});
+
+describe("keyTarget — pierces the shadow DOM (discovery risk #5)", () => {
+  // A keydown captured on `window` is RETARGETED to the shadow host; the real
+  // focused leaf is `composedPath()[0]`. Synthetic objects stand in for the DOM
+  // (vitest env is `node`, no real shadow DOM) — exactly the DOM-independent
+  // KeyEventLike pattern the ladder already uses.
+  const fakeEl = (tagName: string, isContentEditable = false): HTMLElement =>
+    ({ tagName, isContentEditable }) as unknown as HTMLElement;
+
+  it("returns the deepest leaf (the INPUT inside the shadow root), NOT the host", () => {
+    const input = fakeEl("INPUT");
+    const shadowHost = fakeEl("DIFFS-CONTAINER");
+    const e = {
+      target: shadowHost, // RETARGETED to the host (the wrong answer)
+      composedPath: () => [input, shadowHost, globalThis as unknown as EventTarget],
+    };
+    expect(keyTarget(e)).toBe(input);
+  });
+
+  it("the input-guard rung short-circuits for a shadow-DOM input (hotkeys SUPPRESSED)", () => {
+    // Build the KeyEventLike the hook builds — but from the PIERCED leaf, not
+    // the retargeted host. A bare '2' (an entity hotkey) must NOT fire.
+    const input = fakeEl("INPUT");
+    const shadowHost = fakeEl("DIFFS-CONTAINER");
+    const e = {
+      target: shadowHost,
+      composedPath: () => [input, shadowHost, globalThis as unknown as EventTarget],
+    };
+    const target = keyTarget(e);
+    const ev: KeyEventLike = {
+      key: "2",
+      targetTag: target?.tagName,
+      targetEditable: target?.isContentEditable ?? false,
+    };
+    const st: DispatchInput = { entity: "models", view: "topology", modal: false };
+    const r = routeKey(ev, st);
+    expect(r.action).toBeNull(); // input-guard won — no set-entity leaked
+    expect(r.preventDefault).toBe(false);
+  });
+
+  it("a contenteditable leaf inside a shadow host is also guarded", () => {
+    const editable = fakeEl("DIV", /* isContentEditable */ true);
+    const shadowHost = fakeEl("DIFFS-CONTAINER");
+    const e = {
+      target: shadowHost,
+      composedPath: () => [editable, shadowHost, globalThis as unknown as EventTarget],
+    };
+    const target = keyTarget(e);
+    const ev: KeyEventLike = {
+      key: "2",
+      targetTag: target?.tagName,
+      targetEditable: target?.isContentEditable ?? false,
+    };
+    const r = routeKey(ev, { entity: "models", view: "topology", modal: false });
+    expect(r.action).toBeNull();
+  });
+
+  it("falls back to e.target when composedPath is absent or empty", () => {
+    const tgt = fakeEl("BUTTON");
+    expect(keyTarget({ target: tgt })).toBe(tgt); // no composedPath at all
+    expect(keyTarget({ target: tgt, composedPath: () => [] })).toBe(tgt); // empty path
+  });
+
+  it("a real (light-DOM) hotkey still fires — guard does NOT over-suppress", () => {
+    // composedPath[0] is the document body (not a form control) → '2' fires.
+    const body = fakeEl("BODY");
+    const e = { target: body, composedPath: () => [body, globalThis as unknown as EventTarget] };
+    const target = keyTarget(e);
+    const ev: KeyEventLike = { key: "2", targetTag: target?.tagName, targetEditable: false };
+    const r = routeKey(ev, { entity: "models", view: "topology", modal: false });
+    expect(r.action).toEqual({ kind: "set-entity", entity: "models" });
   });
 });
 

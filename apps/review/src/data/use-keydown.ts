@@ -77,6 +77,27 @@ export function applyDispatch(action: DispatchAction): void {
 }
 
 /**
+ * The TRUE focused leaf for a captured keydown — pierces the shadow DOM.
+ *
+ * Discovery risk #5 (the whole reason for capture-phase listening): when a
+ * keydown is captured on `window`, the browser RETARGETS `e.target` to the
+ * shadow HOST (e.g. Pierre's `<diffs-container>`), NOT the `<input>`/`<textarea>`
+ * leaf the user is actually typing in inside the shadow root. Reading `e.target`
+ * therefore mis-reports the host's tag and the input-guard rung never fires — so
+ * hotkeys leak into a comment composer inside the diff.
+ *
+ * `e.composedPath()[0]` is the deepest (real) target, pierced across every shadow
+ * boundary; the input-guard runs against THAT. Falls back to `e.target` when
+ * `composedPath` is unavailable or returns an empty path (defensive — some
+ * synthetic/legacy events).
+ */
+export function keyTarget(e: Pick<KeyboardEvent, "target"> & { composedPath?: () => EventTarget[] }): HTMLElement | null {
+  const path = e.composedPath?.();
+  const leaf = path && path.length > 0 ? path[0] : e.target;
+  return (leaf as HTMLElement | null) ?? null;
+}
+
+/**
  * Mount the single capture-phase keydown dispatcher. Call ONCE at the App root.
  */
 export function useKeydown(): void {
@@ -85,7 +106,9 @@ export function useKeydown(): void {
       const st = useAppStore.getState();
       // Canonicalize the physical key through the live (possibly rebound) keymap.
       const canon = makeCanonicalizer(st.keymapOverride);
-      const target = e.target as HTMLElement | null;
+      // Pierce the shadow DOM: `e.target` is retargeted to the shadow host under
+      // capture; `composedPath()[0]` is the real focused leaf (discovery risk #5).
+      const target = keyTarget(e);
       const ev: KeyEventLike = {
         key: canon(e.key),
         code: e.code,
