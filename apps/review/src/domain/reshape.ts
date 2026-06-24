@@ -20,6 +20,19 @@ export function isLiveThread(t: RenderedThread): boolean {
   return t.line != null && !t.outdated;
 }
 
+// ── @-mention candidate logins for the comment composer ──────────────────────
+// The Composer's mention picker filters candidates with `r.toLowerCase()`, so
+// EVERY candidate must be a plain login STRING. PrRef.author is a login string
+// (PrRef.author?: string) and PrRef.reviewers carries `{ login }` objects, so we
+// project to logins and dedup. Author first (the PR opener leads the picker).
+export function mentionCandidates(context: ContextData): string[] {
+  const logins = (context.pr_ref?.reviewers ?? [])
+    .map((r) => r.login)
+    .filter((l): l is string => !!l);
+  const author = context.pr_ref?.author;
+  return [...new Set([...(author ? [author] : []), ...logins])];
+}
+
 // ── One shared BlockDiff → unified-patch serializer ──────────────────────────
 const SIGIL: Record<BlockDiff["lines"][number]["kind"], string> = {
   context: " ", removed: "-", added: "+",

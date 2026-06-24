@@ -12,7 +12,7 @@ import { loadFixture } from "../data/fixtures";
 import { useAppStore } from "../data/store";
 import { useKeydown } from "../data/use-keydown";
 import { deriveView } from "../data/nav-slice";
-import { buildContexts } from "../domain/reshape";
+import { buildContexts, mentionCandidates } from "../domain/reshape";
 import { buildDataset, type ScopeAxis } from "../domain/data/dataset";
 import { shikiName, ensureHighlighter, type AppTheme } from "../domain/highlighter";
 import type { ContextData } from "../domain/context-data";
@@ -104,6 +104,11 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   // ── instance list per entity (S2: models from the fixture; others stubbed) ─
   const modelNames = useMemo(() => context.models.map((m) => m.name), [context]);
   const instances: readonly string[] = entity === "models" ? modelNames : [];
+
+  // ── PR reviewers (the comment composer's @-mention picker source) ──────────
+  // Login STRINGS only (author + reviewer logins, deduped) — the picker calls
+  // `.toLowerCase()` on each, so a non-string candidate would throw.
+  const reviewers = useMemo(() => mentionCandidates(context), [context]);
 
   const compiledSql = useMemo(() => {
     if (!model) return "";
@@ -226,6 +231,7 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
             ctx={ctx}
             compiledSql={compiledSql}
             shiki={shiki}
+            reviewers={reviewers}
             sel={sel[entity]}
             prScopeByAxis={dataset.prScopeByAxis}
             scopeAxis={scopeAxis}

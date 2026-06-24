@@ -28,6 +28,8 @@ export interface ViewRouterProps {
   /** the compiled SQL string for the Shiki pane. */
   compiledSql: string;
   shiki: string;
+  /** the PR reviewers (for the comment composer's @-mention picker). */
+  reviewers?: string[];
   /** the active instance id (for placeholder bodies). */
   sel: string | null;
   /** the per-axis PR-scope map (dataset.prScopeByAxis) — the PR Topology DAG. */
@@ -67,9 +69,9 @@ export function ViewRouter(p: ViewRouterProps): React.ReactElement {
             <span className="ml-2 font-normal text-zinc-500">({p.ctx?.files.length ?? 0} changed files)</span>
           </h2>
           <section data-testid="diff-section" className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-4">
-            <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">Diff (Pierre)</div>
-            {p.ctx && p.ctx.files[0] ? (
-              <DiffViewer file={p.ctx.files[0]} shiki={p.shiki} />
+            <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">Diff (Pierre · first-party fallback)</div>
+            {p.ctx && p.ctx.files.length > 0 ? (
+              p.ctx.files.map((f) => <DiffViewer key={f.path} file={f} shiki={p.shiki} reviewers={p.reviewers} />)
             ) : (
               <p data-testid="no-diff" className="text-sm text-zinc-500">
                 No changed files for this model.

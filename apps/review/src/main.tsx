@@ -12,6 +12,7 @@ import "@xyflow/react/dist/style.css";
 import "./styles.css";
 import { createRoot } from "react-dom/client";
 import { App } from "./chrome/App";
+import { DiffContractHarness } from "./view/diff/DiffContractHarness";
 import { APP_THEMES, shikiName, ensureHighlighter, isAppTheme, type AppTheme } from "./domain/highlighter";
 
 function renderError(root: ReturnType<typeof createRoot>, theme: string, message: string) {
@@ -46,6 +47,13 @@ async function main() {
     const message = err instanceof Error ? err.message : String(err);
     renderError(root, requested ?? "tokyo", message);
     throw err; // also surface as an uncaught rejection (loud)
+  }
+
+  // TEST-ONLY: the diff-cluster Pierre shadow-DOM contract harness (RISK#2),
+  // reachable via ?contract=diff. Never on the production render path.
+  if (params.get("contract") === "diff") {
+    root.render(<DiffContractHarness shiki={preloadName} />);
+    return;
   }
 
   root.render(<App initialTheme={initialTheme} />);
