@@ -20,6 +20,10 @@ import { PrScopeLineage } from "./graph/PrScopeLineage";
 import { ModelReviewSurface } from "./review/ModelReviewSurface";
 import { TopologyPanes } from "./topology/TopologyPanes";
 import { PrOverview, PrFiles, PrTimeline } from "./pr/PrPage";
+import { EntityReview } from "./entity/EntityReview";
+import type {
+  MacroView, SeedView, ManifestIndex, TestInventory,
+} from "../domain/entity-views";
 import type {
   PrOverview as PrOverviewModel,
   PrFilesView,
@@ -72,6 +76,15 @@ export interface ViewRouterProps {
   prFeed?: PrTimelineFeed;
   /** open a model NAME in the Models review surface (PR files/timeline → model). */
   onOpenModel?: (name: string) => void;
+  // ── S8 entity-review props (the Macros / Seeds / Else surfaces) ────────────
+  /** the reshaped Macros surface (from `macro_lens`). */
+  macros?: MacroView[];
+  /** the reshaped Seeds surface (from `seed_cards`). */
+  seeds?: SeedView[];
+  /** the manifest-node index (sources + node metadata, from `manifest_nodes`). */
+  manifestIndex?: ManifestIndex;
+  /** the aggregated per-column test inventory (from `manifest_nodes`). */
+  testInventory?: TestInventory;
 }
 
 /** An honest "this surface lands in a later slice" placeholder body. */
@@ -192,7 +205,19 @@ export function ViewRouter(p: ViewRouterProps): React.ReactElement {
         <Placeholder label="PR · Timeline" detail="No PR comments in this context." />
       );
     case "entity-review":
-      return <Placeholder label={`${target.entity} · Review`} detail={`Review pane for ${p.sel ?? "—"}`} />;
+      // The Macros / Seeds / Else (sources + tests) review surfaces (S8). Renders
+      // ONLY the real facts the context carries (macro_lens / seed_cards /
+      // manifest_nodes); honest-empty for an entity kind with no instances.
+      return (
+        <EntityReview
+          entity={target.entity}
+          sel={p.sel}
+          macros={p.macros ?? []}
+          seeds={p.seeds ?? []}
+          index={p.manifestIndex ?? { nodes: [], sources: [] }}
+          inventory={p.testInventory ?? { total: 0, entries: [], byKind: {} }}
+        />
+      );
     case "not-available":
       return (
         <Placeholder
