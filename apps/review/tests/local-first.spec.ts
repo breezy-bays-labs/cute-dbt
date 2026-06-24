@@ -193,6 +193,24 @@ test("S4 DAG engine: PR-scope lineage renders via the elkjs worker (real layout,
   const consoleErrors: string[] = [];
   page.on("pageerror", (e) => consoleErrors.push("PAGEERROR: " + e.message));
 
+  // Instrument the Worker constructor BEFORE any script runs so we can prove the
+  // elk worker is kept ALIVE across re-layouts (axis toggle). Each `new Worker`
+  // bumps a page-global elk-worker counter (matched by the vite-emitted "elk"
+  // filename); a re-layout that respawned the worker would increment it.
+  await page.addInitScript(() => {
+    const w = window as unknown as { __elkWorkerCount?: number };
+    w.__elkWorkerCount = 0;
+    const NativeWorker = window.Worker;
+    class CountingWorker extends NativeWorker {
+      constructor(url: string | URL, opts?: WorkerOptions) {
+        const href = typeof url === "string" ? url : url.href;
+        if (/elk/i.test(href)) w.__elkWorkerCount = (w.__elkWorkerCount ?? 0) + 1;
+        super(url, opts);
+      }
+    }
+    window.Worker = CountingWorker as unknown as typeof Worker;
+  });
+
   await page.goto("/index.html", { waitUntil: "networkidle" });
   await page.waitForSelector('[data-testid="entity-tabs"]');
 
@@ -232,6 +250,15 @@ test("S4 DAG engine: PR-scope lineage renders via the elkjs worker (real layout,
     }, { timeout: 8000 })
     .toBeGreaterThan(1);
 
+  // ── the elk worker is kept ALIVE across re-layouts (the #493/#516 fix) ──────
+  // The worker laid out the geometry above, so at least one was spawned. Capture
+  // that count; toggling the axis re-runs elk.layout() on the SAME long-lived
+  // worker (no terminate+respawn), so the count must NOT increase.
+  const workersBefore = await page.evaluate(
+    () => (window as unknown as { __elkWorkerCount?: number }).__elkWorkerCount ?? 0,
+  );
+  expect(workersBefore, "the elk worker laid out the first paint").toBeGreaterThan(0);
+
   // ── the 3-axis toggle swaps the rendered subgraph ─────────────────────────
   await expect(page.locator('[data-testid="axis-option"][data-axis="all"]')).toHaveAttribute("data-active", "true");
   const allNodes = await page.locator('[data-testid="graph-node"]').count();
@@ -239,6 +266,16 @@ test("S4 DAG engine: PR-scope lineage renders via the elkjs worker (real layout,
   await expect(page.locator('[data-testid="axis-option"][data-axis="unit_test"]')).toHaveAttribute("data-active", "true");
   // the fixture's unit_test axis carries a different node count than `all`.
   await expect.poll(async () => page.locator('[data-testid="graph-node"]').count(), { timeout: 5000 }).not.toBe(allNodes);
+
+  // The re-layout reused the live worker — the spawn count is unchanged. (Poll
+  // briefly to let any stray async layout settle; it must never grow.)
+  await expect
+    .poll(
+      async () =>
+        page.evaluate(() => (window as unknown as { __elkWorkerCount?: number }).__elkWorkerCount ?? 0),
+      { timeout: 3000 },
+    )
+    .toBe(workersBefore);
 
   // ── the prNode-vs-sel.models NAV SPLIT: clicking a model PR node sets prNode
   //    (the persisted PR cursor) WITHOUT changing the Models-entity selection ──

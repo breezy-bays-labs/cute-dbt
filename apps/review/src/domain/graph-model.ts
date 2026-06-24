@@ -231,3 +231,20 @@ export function fitView(
   const zoom = Math.max(MIN_K, Math.min((w - 2 * p) / gw, (h - 2 * p) / gh, maxK));
   return { zoom, x: (w - gw * zoom) / 2 - a * zoom, y: (h - gh * zoom) / 2 - b * zoom };
 }
+
+/**
+ * recenterViewport — the zoom-1 transform that centers a single selected node in
+ * a (w×h) canvas (the externally-controlled selection recenter). Returns null on
+ * a zero-/sub-pixel canvas: getBoundingClientRect() reports width/height 0 before
+ * the container paints, and recentering against a 0-size canvas yields a flipped/
+ * incorrect transform — the caller skips the viewport write until a real size
+ * lands (the same null-on-zero-rect contract as fitView).
+ */
+export function recenterViewport(
+  node: { x: number; w: number; y: number },
+  canvas: { w: number; h: number },
+): Viewport | null {
+  const { w, h } = canvas;
+  if (w <= 0 || h <= 0) return null; // not painted yet — skip until it has a real size
+  return { zoom: 1, x: w / 2 - (node.x + node.w / 2), y: h / 2 - 28 - node.y };
+}

@@ -17,6 +17,13 @@ import { LineageGraph } from "./LineageGraph";
 
 const AXIS_LABEL: Record<ScopeAxis, string> = { all: "All", body: "Body", config: "Config", unit_test: "Tests" };
 
+/** A shared empty fallback so an absent `scope.selectable` keeps a STABLE
+ *  reference across renders — a fresh `[]` each render would churn the
+ *  LineageGraph memos (re-render + rfNodes recompute). Module-level + never
+ *  mutated (LineageGraph only reads it); typed `string[]` to stay assignable to
+ *  the `selectableIds?: string[]` prop. */
+const EMPTY: string[] = [];
+
 /** The nav-split + kind-route decision (pure → unit-testable): a model click
  *  STAYS on the PR DAG ("pr-node": sets prNode, never sel.models); a seed/macro/
  *  deleted node ROUTES OUT ("open-model") when an onOpenModel sink exists, else
@@ -47,7 +54,9 @@ export function PrScopeLineage(props: PrScopeLineageProps): React.ReactElement {
   const axes = useMemo(() => availableScopeAxes(byAxis), [byAxis]);
   const scope = pickScopeAxis(byAxis, axis);
   const graph = useMemo(() => scopeToGraph(scope?.data ?? null), [scope]);
-  const selectable = scope?.selectable ?? [];
+  // Memoize so the fallback (`?? EMPTY`) keeps a STABLE reference across renders
+  // — a fresh `[]` each render would re-render LineageGraph + recompute rfNodes.
+  const selectable = useMemo(() => scope?.selectable ?? EMPTY, [scope]);
 
   // KIND-BASED route-out: a model click stays (sets prNode); a seed/macro/deleted
   // node routes out (onOpenModel). The node's kind is carried on the graph node.

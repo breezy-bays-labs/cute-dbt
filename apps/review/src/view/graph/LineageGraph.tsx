@@ -13,7 +13,7 @@ import {
   type Node, type Edge,
 } from "@xyflow/react";
 import {
-  confidenceLegend, edgeMeta, fitView, nearestInDirection, CONFIDENCE,
+  confidenceLegend, edgeMeta, fitView, nearestInDirection, recenterViewport, CONFIDENCE,
   type GraphData, type GraphNode as GraphNodeFacts, type NavDir, type PlacedNode,
 } from "../../domain/graph-model";
 import { GRAPH_NODE_TYPES, GRAPH_NODE_TYPE, type GraphNodeData } from "./GraphNode";
@@ -105,12 +105,16 @@ function LineageGraphInner(props: LineageGraphProps): React.ReactElement {
   }, [doFit, placed]);
 
   // recenter on the externally-controlled selection / zone (opt-out via recenter).
+  // recenterViewport returns null on a zero-/sub-pixel canvas (initial mount,
+  // before getBoundingClientRect() has a real size) so we never write a flipped
+  // viewport transform — the next paint re-runs this effect with a real size.
   useEffect(() => {
     if (!recenter || !selected) return;
     const n = byId[selected];
     if (!n) return;
-    const { w, h } = canvasSize();
-    setViewport({ zoom: 1, x: w / 2 - (n.x + n.w / 2), y: h / 2 - 28 - n.y });
+    const vp = recenterViewport(n, canvasSize());
+    if (!vp) return;
+    setViewport(vp);
   }, [selected, recenter, byId, canvasSize, setViewport]);
 
   const rfNodes: Node[] = useMemo(

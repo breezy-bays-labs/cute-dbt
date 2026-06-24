@@ -88,15 +88,30 @@ export function useGraphLayout(data: GraphData, opts: UseGraphLayoutOpts = {}): 
         // loud-but-graceful: keep the first-party fallback positions.
       });
 
+    // Re-layout (axis toggle, subgraph switch, direction/zone change) only
+    // cancels the in-flight result — it NEVER terminates the worker. Spawning a
+    // Worker is expensive; tearing it down + respawning on every dependency
+    // change caused UI lag. The ONE elkRef worker stays alive and services the
+    // next elk.layout() call; only the unmount effect below disposes it.
     return () => {
       cancelled = true;
+    };
+  }, [nodeKey, edgeKey, direction, hasZones]);
+
+  // Dedicated unmount-only disposal (empty deps): elkjs never disposes its
+  // bundled worker itself, so without this the live Worker leaks when the
+  // component unmounts. Guarded — only call when the instance + method exist
+  // (elkjs 0.11.1 exposes ELK#terminateWorker). Clear the ref so a remount
+  // constructs a fresh ELK + worker.
+  useEffect(() => {
+    return () => {
       const elkToDispose = elkRef.current;
       if (elkToDispose && typeof elkToDispose.terminateWorker === "function") {
         elkToDispose.terminateWorker();
         elkRef.current = null;
       }
     };
-  }, [nodeKey, edgeKey, direction, hasZones]);
+  }, []);
 
   return placed;
 }

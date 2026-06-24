@@ -4,7 +4,7 @@
 import { describe, it, expect } from "vitest";
 import {
   CONFIDENCE, MIN_K, NODE_W, NODE_W_MAX,
-  confidenceCounts, confidenceLegend, confidenceStyle, edgeMeta, fitView, nearestInDirection, nodeWidth,
+  confidenceCounts, confidenceLegend, confidenceStyle, edgeMeta, fitView, nearestInDirection, nodeWidth, recenterViewport,
   type GraphEdge, type PlacedNode,
 } from "./graph-model";
 
@@ -94,6 +94,33 @@ describe("fitView — the MIN_K anti-flip floor", () => {
     const plain = fitView(ns, { w: 800, h: 600 })!;
     const zoned = fitView(ns, { w: 800, h: 600 }, { hasZones: true })!;
     expect(zoned.zoom).toBeLessThanOrEqual(plain.zoom);
+  });
+});
+
+describe("recenterViewport — the zero-rect guard (the #493/#516 fix)", () => {
+  const n = { x: 100, w: 60, y: 40 };
+
+  it("is a no-op (returns null) on a zero-size canvas — getBoundingClientRect 0×0 on initial mount", () => {
+    expect(recenterViewport(n, { w: 0, h: 0 })).toBeNull();
+  });
+
+  it("is a no-op when EITHER width or height is 0 (no flipped transform)", () => {
+    expect(recenterViewport(n, { w: 0, h: 600 })).toBeNull();
+    expect(recenterViewport(n, { w: 900, h: 0 })).toBeNull();
+  });
+
+  it("is a no-op on a negative (degenerate) rect", () => {
+    expect(recenterViewport(n, { w: -10, h: 600 })).toBeNull();
+  });
+
+  it("centers the node at zoom 1 once the canvas has a real size", () => {
+    const vp = recenterViewport(n, { w: 900, h: 600 })!;
+    expect(vp.zoom).toBe(1);
+    // x centers the node's mid-x; y centers with the −28 header offset.
+    expect(vp.x).toBe(900 / 2 - (100 + 60 / 2));
+    expect(vp.y).toBe(600 / 2 - 28 - 40);
+    expect(Number.isFinite(vp.x)).toBe(true);
+    expect(Number.isFinite(vp.y)).toBe(true);
   });
 });
 
