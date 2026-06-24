@@ -39,7 +39,7 @@ export interface KbContext {
   inReview?: boolean;
   /** true while ≥1 in-scope model is still unreviewed (next/prev-unreviewed). */
   hasUnreviewed?: boolean;
-  /** true when a comment thread is focused + resolvable (resolve-from-keyboard). */
+  /** true when a comment thread is focused + resolvable (the keyboard-resolve handler signal). */
   hasOpenThread?: boolean;
 }
 
@@ -134,7 +134,14 @@ export function hasUnreviewedTarget(c: KbContext): boolean {
   return isReviewable(c) && c.hasUnreviewed === true;
 }
 
-/** resolve-from-keyboard needs a focused, resolvable thread. */
+/**
+ * `resolve` (⇧R) is keyed whenever a thread surface is focused (`inThreads`) —
+ * matching the prototype, so the footer chip + key are shown in-threads. Whether
+ * a thread is actually OPEN/resolvable at the cursor is a HANDLER-time signal
+ * (`c.hasOpenThread`), not a key-visibility gate: the binding stays visible and
+ * the S2/V1 handler decides whether the keypress resolves anything. This keeps
+ * exactly ONE action on the ⇧R chord (no subset-`when` twin to conflict with).
+ */
 export function canResolveThread(c: KbContext): boolean {
   return inThreads(c) && c.hasOpenThread === true;
 }
@@ -255,14 +262,19 @@ export const KEY_GROUPS: readonly KeyGroup[] = [
       },
       { id: "quote", def: "q", label: "quote-reply the focused comment", when: inThreads },
       { id: "edit", def: "e", label: "edit the focused comment", when: inThreads },
+      // Council MUST-FIX D: `resolve` (⇧R) IS the first-class keyboard-resolve
+      // flow action — the prototype's pre-existing `resolve` (keymap.js, R =
+      // inThreads) already IS "resolve the focused thread from the keyboard", so
+      // it is the council-D keyboard-resolve verb, not a separate one. It is kept
+      // as the SINGLE keyboard-resolve action on ⇧R; there is no second action on
+      // that chord (an earlier draft added a redundant `resolve-from-keyboard`
+      // whose `when` — inThreads && hasOpenThread — was a STRICT SUBSET of this
+      // one's `inThreads`, so both were co-active on ⇧R wherever it fired: a
+      // registry conflict findConflicts reports. Collapsing to one removes it.)
+      // The prototype's handler is mouse-only (FEATURE-GAP P2#6); the keyboard
+      // handler wiring (and reading the focused/open-thread signal) lands in
+      // S2/V1 — this registry entry is the SSOT it derives from.
       { id: "resolve", def: "R", label: "resolve / unresolve the focused thread", when: inThreads },
-      // Council MUST-FIX D: resolve-from-keyboard (⇧R). The prototype's `resolve`
-      // (R = ⇧r) already resolves the FOCUSED thread when a thread is hovered;
-      // this flow action resolves from anywhere a thread is open + focused
-      // WITHOUT first navigating onto it (the keyboard review loop). Distinct id,
-      // same ⇧R chord but a strictly-narrower when (cross-context reuse is allowed
-      // — they are never both the "focused" handler in the same context).
-      { id: "resolve-from-keyboard", def: "R", label: "resolve the open thread (keyboard flow)", when: canResolveThread },
       { id: "next-open-thread", def: "o", label: "next open conversation (PR-wide)", when: (c) => c.entity === "models" || c.entity === "pr" },
       { id: "prev-open-thread", def: "O", label: "previous open conversation", when: (c) => c.entity === "models" || c.entity === "pr" },
       // The prototype's `mark` (x = mark-reviewed). Council MUST-FIX D reframes it
@@ -542,9 +554,9 @@ export function footerHints(ctx: KbContext, keymap?: Keymap | null): FooterChip[
     chip("mark-reviewed-advance", [k("mark-reviewed-advance")], "reviewed");
     chip("next-unreviewed", [k("next-unreviewed"), k("prev-unreviewed")], "unreviewed");
   }
-  if (inThreads(ctx)) {
-    chip("resolve-from-keyboard", [k("resolve-from-keyboard")], "resolve thread");
-  }
+  // The keyboard-resolve flow chip IS the `resolve` chip emitted above (⇧R,
+  // inThreads) — council-D's keyboard-resolve verb, not a separate action. No
+  // distinct "resolve thread" chip: that was the deduped `resolve-from-keyboard`.
   // command-mode is always available — a persistent app-level chip.
   chip("command-mode", [k("command-mode")], "command");
 

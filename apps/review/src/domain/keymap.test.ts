@@ -49,21 +49,37 @@ const AVAIL: Record<Entity, string[]> = {
   else: ["review"],
 };
 
-/** Build a KbContext for every (entity, view, codeMode?) the app can be in. */
+/**
+ * Build a KbContext for every (entity, view, codeMode?) the app can be in,
+ * EXHAUSTIVELY enumerated over the flow-signal boolean axes the flow actions
+ * gate on. The earlier cube fixed those booleans at undefined, so it never
+ * visited the cells where the flow actions (next/prev-unreviewed,
+ * resolve-from-keyboard) become active — the very cells where a key conflict on
+ * a flow action would show up. Enumerating `hasOpenThread` × `hasUnreviewed`
+ * (the two flow-signal booleans the when-predicates read) makes the cube
+ * genuinely cover every active-context cell, so the conflict-free guarantee
+ * (findConflicts is empty for every cell) is sound, not vacuously true.
+ */
 function buildCube(): KbContext[] {
   const out: KbContext[] = [];
+  const BOOLS = [undefined, false, true] as const;
   (Object.keys(AVAIL) as Entity[]).forEach((entity) => {
     const views = AVAIL[entity];
     views.forEach((view) => {
       const viewCount = views.length;
       // code surfaces additionally vary codeMode (diff | file)
-      if (view === "code") {
-        (["diff", "file"] as const).forEach((codeMode) => {
-          out.push({ entity, view, codeMode, viewCount });
+      const codeModes = view === "code" ? (["diff", "file"] as const) : ([undefined] as const);
+      codeModes.forEach((codeMode) => {
+        // flow-signal axes: hasOpenThread (drives resolve-from-keyboard's
+        // canResolveThread) × hasUnreviewed (drives next/prev-unreviewed's
+        // hasUnreviewedTarget). undefined | false | true each visited so the
+        // active set is enumerated over the full flow-context space.
+        BOOLS.forEach((hasOpenThread) => {
+          BOOLS.forEach((hasUnreviewed) => {
+            out.push({ entity, view, codeMode, viewCount, hasOpenThread, hasUnreviewed });
+          });
         });
-      } else {
-        out.push({ entity, view, viewCount });
-      }
+      });
     });
   });
   return out;
@@ -194,15 +210,16 @@ describe("activeActionIds over the entity×view×codeMode cube", () => {
 
 describe("findConflicts — same key in two ACTIVE contexts; cross-screen reuse allowed", () => {
   it("the default keymap is globally conflict-free in cross-context (no activeSet)", () => {
-    // Without an activeSet, cross-context reuse (R/resolve vs resolve-from-keyboard,
-    // x/mark, etc.) IS counted as a global key share. The only deliberate global
-    // share is the ⇧R chord (resolve / resolve-from-keyboard), which is allowed
-    // because they are never both the focused handler in the same context.
+    // After the dedup there is NO global key share at all: every action has a
+    // distinct (layer, base). The earlier draft kept two actions on ⇧R (resolve
+    // + resolve-from-keyboard); collapsing to one removes the only global share,
+    // so findConflicts with no activeSet is empty.
     const conflicts = findConflicts(defaultKeymap());
-    // every reported conflict must be a context-exclusive pair (never co-active).
+    expect(conflicts).toEqual([]);
+    // and (defensively) any conflict that ever WERE reported must be a
+    // context-exclusive pair — vacuously satisfied here.
     conflicts.forEach((c) => {
       const ids = c.actions.map((a) => a.id);
-      // assert no cube context activates all of them together.
       const coActive = CUBE.some((ctx) => {
         const active = activeActionIds(ctx);
         return ids.every((id) => active.has(id));
@@ -211,7 +228,14 @@ describe("findConflicts — same key in two ACTIVE contexts; cross-screen reuse 
     });
   });
 
-  it("no ACTIVE-context conflict exists in ANY cube cell (the real gate)", () => {
+  it("no ACTIVE-context conflict exists in ANY cube cell (the SSOT guarantee)", () => {
+    // The mechanical guarantee: two distinct actions never share a key in the
+    // same active context. Asserted over the FULL exhaustive cube — every
+    // (entity, view, codeMode) × (hasOpenThread × hasUnreviewed) cell, so it
+    // visits the cells where each flow action becomes active (the cells the
+    // earlier cube omitted, which hid the resolve/resolve-from-keyboard ⇧R
+    // conflict). It now genuinely holds because the dedup left exactly one
+    // action on ⇧R.
     CUBE.forEach((ctx) => {
       const active = activeActionIds(ctx);
       const conflicts = findConflicts(defaultKeymap(), active);
@@ -241,11 +265,16 @@ describe("findConflicts — same key in two ACTIVE contexts; cross-screen reuse 
 });
 
 describe("Council MUST-FIX D — flow actions registered first-class without conflict", () => {
+  // The council-D flow set. `resolve` (the prototype's pre-existing R/inThreads
+  // action) IS the keyboard-resolve flow verb — there is NO separate
+  // `resolve-from-keyboard` (it was a redundant subset-`when` twin on ⇧R and was
+  // deduped). So the set is: mark-reviewed-advance, next/prev-unreviewed,
+  // resolve, command-mode.
   const FLOW_IDS = [
     "mark-reviewed-advance",
     "next-unreviewed",
     "prev-unreviewed",
-    "resolve-from-keyboard",
+    "resolve",
     "command-mode",
   ];
 
@@ -258,8 +287,13 @@ describe("Council MUST-FIX D — flow actions registered first-class without con
     });
   });
 
-  it("resolve-from-keyboard suggests ⇧R", () => {
-    const a = ALL_ACTIONS.find((x) => x.id === "resolve-from-keyboard");
+  it("there is exactly ONE keyboard-resolve action and it is `resolve` on ⇧R", () => {
+    // the dedup invariant: no `resolve-from-keyboard`, and `resolve` is the
+    // single ⇧R keyboard-resolve verb (council-D's keyboard-resolve flow).
+    expect(ALL_ACTIONS.find((x) => x.id === "resolve-from-keyboard")).toBeUndefined();
+    const resolveActions = ALL_ACTIONS.filter((a) => a.def === "R");
+    expect(resolveActions.map((a) => a.id)).toEqual(["resolve"]);
+    const a = ALL_ACTIONS.find((x) => x.id === "resolve");
     expect(a?.def).toBe("R");
     expect(displayKey(a?.def)).toBe("⇧R");
   });
@@ -289,12 +323,21 @@ describe("Council MUST-FIX D — flow actions registered first-class without con
     expect(activeActionIds(withUnreviewed).has("next-unreviewed")).toBe(true);
   });
 
-  it("canResolveThread gates resolve-from-keyboard honestly", () => {
+  it("canResolveThread is the HANDLER signal, not a key-visibility gate", () => {
+    // `resolve` (⇧R) is keyed whenever inThreads — the prototype's behavior — so
+    // the key/footer chip is visible across the whole thread surface, NOT gated
+    // on hasOpenThread (that would be the subset-`when` that conflicted). The
+    // canResolveThread helper is the separate HANDLER-time signal the S2/V1
+    // resolve handler reads to decide whether a keypress actually resolves.
     const noThread: KbContext = { entity: "models", view: "topology", viewCount: 3 };
     expect(canResolveThread(noThread)).toBe(false);
+    // resolve stays keyed in-threads regardless of hasOpenThread.
+    expect(activeActionIds(noThread).has("resolve")).toBe(true);
     const withThread: KbContext = { ...noThread, hasOpenThread: true };
     expect(canResolveThread(withThread)).toBe(true);
-    expect(activeActionIds(withThread).has("resolve-from-keyboard")).toBe(true);
+    expect(activeActionIds(withThread).has("resolve")).toBe(true);
+    // and there is no `resolve-from-keyboard` action to activate.
+    expect(activeActionIds(withThread).has("resolve-from-keyboard")).toBe(false);
   });
 
   it("mark-reviewed-advance is the canonical mark verb (x, reviewable surfaces)", () => {
@@ -449,11 +492,15 @@ describe("footerHints — registry-derived chips, honest flow degrade", () => {
     expect(active.find((c) => c.label === "unreviewed")?.active).toBe(true);
   });
 
-  it("the resolve-thread flow chip appears greyed in-threads with no open thread", () => {
+  it("the resolve chip IS the keyboard-resolve flow chip (⇧R, active in-threads)", () => {
+    // after the dedup there is one resolve chip — `resolve` (⇧R, inThreads) — and
+    // NO separate greyed "resolve thread" chip (that was the deduped twin).
     const chips = footerHints({ entity: "models", view: "topology", viewCount: 3 });
-    const resolve = chips.find((c) => c.label === "resolve thread");
+    expect(chips.some((c) => c.label === "resolve thread")).toBe(false);
+    const resolve = chips.find((c) => c.label === "resolve");
     expect(resolve).toBeDefined();
-    expect(resolve?.active).toBe(false);
+    expect(resolve?.active).toBe(true);
+    expect(resolve?.keys).toContain("⇧R");
   });
 
   it("chip keys reflect a rebinding (footer never drifts from the keymap)", () => {
