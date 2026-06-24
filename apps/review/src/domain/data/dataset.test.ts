@@ -6,7 +6,7 @@ import { loadFixture, rawFixture } from "../../data/fixtures";
 import { parseContext } from "../schema";
 import type { ContextData, FindingPayload } from "../context-data";
 import {
-  blockDiffToHunks, blockDiffToPatch, buildDataset, dagToCte, findingsToCoverage,
+  blockDiffToHunks, blockDiffToPatch, buildDataset, buildSeedRecords, dagToCte, findingsToCoverage,
   pierreSide, prDagToScope, schemaOf, sourceToContextPatch, stateToChange, threadsByPath,
 } from "./dataset";
 
@@ -48,6 +48,48 @@ describe("raw NEVER masquerades as compiled (the honesty invariant)", () => {
     const withMap = ds.MODELS.map((n) => ds.D[n]!).find((r) => r.compiledSql != null);
     expect(withMap).toBeDefined();
     expect(withMap!.compiledSql).not.toBe(withMap!.rawSql);
+  });
+});
+
+describe("dataset maps — untrusted node/column/seed name keys can't pollute the prototype", () => {
+  // The reshaper's maps are keyed by dbt node/column/model/seed names, all
+  // attacker-influenceable. A name literally `__proto__` must land as a real OWN
+  // key on a null-proto map — never mutate Object.prototype. (gemini-code-assist, #515)
+  it("a model named __proto__ is a real own-key in D/CTE/MODELS, not a prototype mutation", () => {
+    const data = {
+      baseline: "main",
+      models: [{ name: "__proto__", path: "models/marts/__proto__.sql", state: "modified", raw_sql: "select 1" }],
+      seed_cards: [], pr_comments: { by_model: [], unanchored: [] },
+    } as unknown as ContextData;
+    const ds = buildDataset(data);
+    expect(ds.MODELS).toContain("__proto__");
+    expect(Object.prototype.hasOwnProperty.call(ds.D, "__proto__")).toBe(true); // an OWN key
+    expect(ds.D["__proto__"]).toBeDefined();
+    expect(Object.prototype.hasOwnProperty.call(ds.CTE, "__proto__")).toBe(true);
+    // the global Object prototype is untouched (the entry did not climb the chain).
+    expect(({} as Record<string, unknown>)["polluted"]).toBeUndefined();
+    expect(Object.getPrototypeOf({})).toBe(Object.prototype);
+  });
+  it("a seed card + column literally named __proto__ are own-keys, not prototype mutations", () => {
+    const data = {
+      baseline: "main", models: [],
+      seed_cards: [{
+        name: "__proto__", original_file_path: "seeds/__proto__.csv",
+        column_types: "__proto__:varchar", table: { columns: ["__proto__"], rows: [] },
+      }],
+      pr_comments: { by_model: [], unanchored: [] },
+    } as unknown as ContextData;
+    const { seeds, seedRecords } = buildSeedRecords(data);
+    expect(seeds).toContain("__proto__");
+    expect(Object.prototype.hasOwnProperty.call(seedRecords, "__proto__")).toBe(true);
+    const rec = seedRecords["__proto__"]!;
+    expect(rec).toBeDefined();
+    // the colTypes map (parseSeedColumnTypes) is also null-proto + stores the own key.
+    expect(Object.prototype.hasOwnProperty.call(rec.colTypes, "__proto__")).toBe(true);
+    expect(rec.colTypes["__proto__"]).toBe("varchar");
+    // the global Object prototype is untouched.
+    expect(({} as Record<string, unknown>)["polluted"]).toBeUndefined();
+    expect(Object.getPrototypeOf({})).toBe(Object.prototype);
   });
 });
 

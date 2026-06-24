@@ -105,7 +105,8 @@ export function prDagToScope(
 ): PrScope | null {
   if (!prDag || !prDag.graph) return null;
   const g = prDag.graph;
-  const idToName: Record<string, string> = {};
+  // null-proto map: keys are untrusted node ids (see parseSeedColumnTypes).
+  const idToName: Record<string, string> = Object.create(null) as Record<string, string>;
   g.nodes.forEach((n) => { idToName[n.id] = n.name; });
   const mat = matByName ?? {};
   const cb = changeByName ?? {};
@@ -167,7 +168,9 @@ export function adaptTest(t: TestPayload): AdaptedTest {
 
 // ── seeds ────────────────────────────────────────────────────────────────────
 function parseSeedColumnTypes(str: string | undefined): Record<string, string> {
-  const out: Record<string, string> = {};
+  // null-proto map: keys are untrusted seed column names; a stray `__proto__`/
+  // `constructor` column can't pollute the chain (matches col-lineage/raw-spans).
+  const out: Record<string, string> = Object.create(null) as Record<string, string>;
   String(str ?? "").split(",").forEach((p) => {
     const ix = p.indexOf(":"); if (ix < 0) return;
     const k = p.slice(0, ix).trim(); if (k) out[k] = p.slice(ix + 1).trim();
@@ -183,7 +186,8 @@ export interface SeedRecord {
 }
 export function buildSeedRecords(data: ContextData): { seeds: string[]; seedRecords: Record<string, SeedRecord> } {
   const seeds: string[] = [];
-  const seedRecords: Record<string, SeedRecord> = {};
+  // null-proto map: keys are untrusted seed card names (see parseSeedColumnTypes).
+  const seedRecords: Record<string, SeedRecord> = Object.create(null) as Record<string, SeedRecord>;
   (data.seed_cards ?? []).forEach((card: SeedCard) => {
     const cols = (card.table && card.table.columns) ?? [];
     let diffRows: SeedRecord["diffRows"] = [];
@@ -434,7 +438,8 @@ function makeLiveCommentsFor(data: ContextData): (path: string) => CommentEntry[
  * tracked: cute-dbt#508 — B1 */
 function attachDownstream(prScope: PrScope | null, models: string[], D: Record<string, ModelRecord>): void {
   if (!prScope || !prScope.data) return;
-  const downByName: Record<string, string[]> = {};
+  // null-proto map: keys are untrusted model names from DAG edges (see parseSeedColumnTypes).
+  const downByName: Record<string, string[]> = Object.create(null) as Record<string, string[]>;
   (prScope.data.edges ?? []).forEach(([from, to]) => {
     if (from && to && from !== to) (downByName[from] = downByName[from] ?? []).push(to);
   });
@@ -474,10 +479,11 @@ export function buildDataset(data: ContextData): Dataset {
   const { seeds, seedRecords } = buildSeedRecords(data);
   const liveCommentsFor = makeLiveCommentsFor(data);
 
-  const D: Record<string, ModelRecord> = {};
-  const CTE: Record<string, CteGraph | null> = {};
+  // null-proto maps: keys are untrusted model names (see parseSeedColumnTypes).
+  const D: Record<string, ModelRecord> = Object.create(null) as Record<string, ModelRecord>;
+  const CTE: Record<string, CteGraph | null> = Object.create(null) as Record<string, CteGraph | null>;
   const MODELS: string[] = [];
-  const schemaByName: Record<string, string> = {};
+  const schemaByName: Record<string, string> = Object.create(null) as Record<string, string>;
   (data.models ?? []).forEach((m) => { schemaByName[m.name] = schemaOf(m.path ?? `${m.name}.sql`); });
   (data.models ?? []).forEach((m) => {
     const fileName = (m.path ?? `${m.name}.sql`).split("/").pop() || m.name;
@@ -486,8 +492,9 @@ export function buildDataset(data: ContextData): Dataset {
     CTE[m.name] = ensureMainNode(dagToCte(m.dag), fileName);
   });
 
-  const matByName: Record<string, { materialized: string }> = {};
-  const changeByName: Record<string, string> = {};
+  // null-proto maps: keys are untrusted model names (see parseSeedColumnTypes).
+  const matByName: Record<string, { materialized: string }> = Object.create(null) as Record<string, { materialized: string }>;
+  const changeByName: Record<string, string> = Object.create(null) as Record<string, string>;
   MODELS.forEach((n) => {
     matByName[n] = { materialized: D[n]?.info.materialized || "view" };
     if (D[n]) changeByName[n] = D[n]!.change;
