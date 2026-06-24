@@ -1,3 +1,21 @@
 /* Tailwind v4 entry — single @import, no PostCSS (the @tailwindcss/vite plugin
    handles it). System-font stack only; NO webfont @import (local-first). */
 @import "tailwindcss";
+
+/* The forward-sync RING FLASH (S6b) — applied to a code row by CompiledView when
+   the scroll nonce bumps (a DAG node was picked) so the synced block flashes once
+   into the reviewer's eye, then fades. Removed after 1.5s by the component. The
+   keyframe is a pure box-shadow pulse (no layout shift, no webfont, no asset). */
+.kbd-ring {
+  animation: kbd-ring-flash 1.5s ease-out;
+}
+@keyframes kbd-ring-flash {
+  0% {
+    box-shadow: inset 0 0 0 2px rgba(122, 162, 247, 0.9);
+    background: rgba(122, 162, 247, 0.28);
+  }
+  100% {
+    box-shadow: inset 0 0 0 2px rgba(122, 162, 247, 0);
+    background: transparent;
+  }
+}
