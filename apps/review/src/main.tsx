@@ -13,6 +13,7 @@ import "./styles.css";
 import { createRoot } from "react-dom/client";
 import { App } from "./chrome/App";
 import { DiffContractHarness } from "./view/diff/DiffContractHarness";
+import { TopologyContractHarness } from "./view/topology/TopologyContractHarness";
 import { APP_THEMES, shikiName, ensureHighlighter, isAppTheme, type AppTheme } from "./domain/highlighter";
 
 function renderError(root: ReturnType<typeof createRoot>, theme: string, message: string) {
@@ -53,6 +54,15 @@ async function main() {
   // reachable via ?contract=diff. Never on the production render path.
   if (params.get("contract") === "diff") {
     root.render(<DiffContractHarness shiki={preloadName} />);
+    return;
+  }
+
+  // TEST-ONLY: the S6c zone-region / fan-out harness mounting the real looped
+  // model (order_status_pivot), reachable via ?contract=topology. The looped
+  // fixtures are out of the sidebar's PR scope (cute-dbt#523), so the live ring
+  // click-through is asserted here. Never on the production render path.
+  if (params.get("contract") === "topology") {
+    root.render(<TopologyContractHarness shiki={preloadName} />);
     return;
   }
 
