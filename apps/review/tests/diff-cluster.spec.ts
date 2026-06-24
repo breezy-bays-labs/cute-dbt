@@ -7,7 +7,11 @@
 //   3. the ACTIVE theme is the requested one (genuine tokyo-night, NOT a silent
 //      github-dark fallback);
 //   4. keyboard input inside the Pierre shadow root is GUARDED via composedPath —
-//      typing in the diff does NOT trigger the app's entity dispatcher;
+//      a key dispatched from INSIDE the diff does NOT trigger the app's entity
+//      dispatcher, while the SAME key from the light DOM DOES (the positive
+//      control that proves the dispatcher is live — so this fails if the guard is
+//      removed; the harness mounts the real useKeydown dispatcher + an
+//      entity-reactive probe to make the side-effect observable);
 //   5. the FIRST-PARTY fallback renders (a Pierre breakage degrades, never blank);
 //   6. ZERO external (non-localhost) requests throughout.
 import { test, expect, type Page } from "@playwright/test";
@@ -92,21 +96,41 @@ test("RISK#2: Pierre side-slot anchoring + genuine theme + shadow keyboard guard
   expect(theme.anyGithubDark, "no silent github-dark fallback").toBe(false);
   expect(await page.getByTestId("highlighter-error").count()).toBe(0);
 
-  // ── (4) shadow keyboard guard via composedPath: focus a node INSIDE the Pierre
-  //    shadow root and type the entity key "3"; the app dispatcher must NOT route
-  //    it (no overlay/nav change). We assert no page error + that a known app
-  //    side-effect (body[data-highlighter-error]) never appears, and that the
-  //    harness stays mounted (the dispatcher did not navigate away). ───────────
+  // ── (4) shadow keyboard guard via composedPath — exercised against the REAL
+  //    dispatcher this harness mounts (`useKeydown`). The entity key "3" routes to
+  //    set-entity("macros"); the entity-reactive probe ([data-entity]) is the
+  //    dispatcher's observable side-effect. The contract: a "3" whose composedPath
+  //    CROSSES the Pierre shadow host is GUARDED (entity unchanged), while a "3"
+  //    from the LIGHT DOM is NOT (entity flips) — the positive control proving the
+  //    dispatcher is live, so this whole rung FAILS if the guard is removed
+  //    (the in-shadow "3" would then flip the entity too). ─────────────────────
+  const probe = page.getByTestId("contract-entity-probe");
+  await expect(probe).toHaveAttribute("data-entity", "models"); // dispatcher baseline
+
+  // (4a) GUARDED: dispatch "3" from inside the Pierre shadow root → NO route.
   await page.evaluate(() => {
     const host = document.querySelector('[data-testid="contract-pierre-left"] diffs-container');
     const sr = (host as Element & { shadowRoot?: ShadowRoot } | null)?.shadowRoot;
     const target = sr?.querySelector<HTMLElement>("[data-line]") ?? null;
+    if (!target) throw new Error("contract precondition: no [data-line] node inside the Pierre shadow root");
     // dispatch a keydown whose composedPath crosses the shadow host.
     const ev = new KeyboardEvent("keydown", { key: "3", bubbles: true, composed: true, cancelable: true });
-    (target ?? document.body).dispatchEvent(ev);
+    target.dispatchEvent(ev);
   });
-  // the harness is still the mounted surface (the dispatcher did not hijack "3").
+  // the guard suppressed it — the dispatcher did NOT set-entity("macros").
+  await expect(probe).toHaveAttribute("data-entity", "models");
+  // the harness is still the mounted surface (the dispatcher did not navigate away).
   await expect(page.getByTestId("diff-contract-harness")).toBeVisible();
+
+  // (4b) POSITIVE CONTROL: the SAME "3" from the LIGHT DOM IS routed → entity
+  //      flips to "macros". This proves the dispatcher is live + reactive, so
+  //      (4a)'s "unchanged" assertion is load-bearing (it would break with the
+  //      guard removed). composedPath here crosses no shadow host / editable.
+  await page.evaluate(() => {
+    const ev = new KeyboardEvent("keydown", { key: "3", bubbles: true, composed: true, cancelable: true });
+    document.body.dispatchEvent(ev);
+  });
+  await expect(probe).toHaveAttribute("data-entity", "macros");
 
   // ── (5) first-party fallback rendered (Pierre forced down) ─────────────────
   await expect(page.locator('[data-testid="contract-fallback"] [data-testid="fallback-diff"]')).toBeVisible();
