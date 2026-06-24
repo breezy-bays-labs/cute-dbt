@@ -106,6 +106,66 @@ export function initialSyncState(): SyncState {
   return { node: null, zone: null, cursor: null, scrollNonce: 0, lastScrolled: null };
 }
 
+// ── totality guards — the resolution helpers must be PANIC-FREE ───────────────
+//
+// The public span types (SourceSpan/ZoneSpan) declare start/end/line non-optional,
+// but the maps are built from a RUNTIME payload — a missing field, a non-numeric
+// line, or an inverted range (`end < start`) would, unguarded, throw a TypeError or
+// silently mis-resolve (a negative "length" winning the innermost tie). The two
+// validators below make every resolver TOTAL: a malformed span/zone is SKIPPED
+// (never throws, never a candidate), and well-formed input is unchanged.
+
+/** A finite-number line predicate — rejects NaN/Infinity/non-number (the runtime
+ *  payload could carry a string, null, or NaN where a line is typed). */
+function isFiniteLine(n: unknown): n is number {
+  // tracked: cute-dbt#517 — equivalent: the `typeof n === "number"`→`true`
+  // ConditionalExpression mutant collapses this to `Number.isFinite(n)`, which is
+  // BEHAVIORALLY IDENTICAL — `Number.isFinite` never coerces, so it already returns
+  // false for every non-number (string/null/boolean). The `typeof` conjunct is a
+  // readability witness for the `n is number` guard, not an observable branch. (The
+  // `&&`→`||` LogicalOperator mutant on this line IS killed by the Infinity-bounded
+  // span test — `typeof Infinity === "number"` short-circuits `||`.)
+  // Stryker disable next-line ConditionalExpression
+  return typeof n === "number" && Number.isFinite(n);
+}
+
+/** A line span is VALID iff both endpoints exist with finite line numbers and the
+ *  range is not inverted (`end >= start`; a zero-length single-line span is valid). */
+function validLineSpan(sp: LineSpan | undefined): sp is LineSpan {
+  return (
+    sp != null &&
+    sp.start != null &&
+    sp.end != null &&
+    isFiniteLine(sp.start.line) &&
+    isFiniteLine(sp.end.line) &&
+    // tracked: cute-dbt#517 — equivalent: the `>= `→`true` ConditionalExpression
+    // mutant accepts an INVERTED span (`end < start`), but every caller then applies
+    // the INCLUSIVE `line >= start && line <= end` test, which is unsatisfiable when
+    // `end < start` (no line is both ≥ a larger start and ≤ a smaller end). So an
+    // accepted inverted span never matches → no observable difference. The clause is
+    // a defensive totality guard (gemini #518) + a clarity witness, not a live branch.
+    // Stryker disable next-line ConditionalExpression
+    sp.end.line >= sp.start.line
+  );
+}
+
+/** A zone is VALID iff its boundary lines are finite numbers and not inverted
+ *  (`endLine >= startLine`; a zero-length single-line zone is valid). */
+function validZone(z: ZoneSpan | undefined): z is ZoneSpan {
+  return (
+    z != null &&
+    isFiniteLine(z.startLine) &&
+    isFiniteLine(z.endLine) &&
+    // tracked: cute-dbt#517 — equivalent: the `>= `→`true` ConditionalExpression
+    // mutant accepts an INVERTED zone (`endLine < startLine`), but the loop then
+    // applies the INCLUSIVE `line >= startLine && line <= endLine` test, which is
+    // unsatisfiable when `endLine < startLine` → an accepted inverted zone never
+    // matches → no observable difference. A defensive totality guard (gemini #518).
+    // Stryker disable next-line ConditionalExpression
+    z.endLine >= z.startLine
+  );
+}
+
 // ── (1) resolution — innermost-span-wins, never-fabricate ─────────────────────
 
 /**
@@ -128,12 +188,13 @@ export function innermostSpan(spans: Record<string, LineSpan>, line: number | nu
   let best: string | null = null;
   let bestLen = Infinity;
   for (const id in spans) {
+    // skip inherited prototype properties — a polluted `Object.prototype` (or a
+    // non-null-proto map) must not inject phantom spans into the resolution.
+    if (!Object.prototype.hasOwnProperty.call(spans, id)) continue;
     const sp = spans[id];
-    // tracked: cute-dbt#517 — equivalent: `for…in` over own enumerable string
-    // keys never yields an `undefined` value for `spans[id]`; this is a defensive
-    // guard the typed `Record<string, LineSpan>` makes unreachable on real input.
-    // Stryker disable next-line ConditionalExpression
-    if (!sp) continue;
+    // skip a malformed span (missing/non-numeric endpoint or an inverted range) so
+    // the resolver is TOTAL — a negative-"length" inverted span never wins the tie.
+    if (!validLineSpan(sp)) continue;
     if (line >= sp.start.line && line <= sp.end.line) {
       const len = sp.end.line - sp.start.line;
       if (len < bestLen) {
@@ -186,6 +247,9 @@ export function rawTargetForLine(maps: SyncMaps, line: number | null): RawTarget
   // the loop matches nothing, identical to the real empty-array fallback.
   // Stryker disable next-line ArrayDeclaration
   for (const z of maps.zones ?? []) {
+    // skip a malformed zone (missing/non-numeric boundary or an inverted range) so
+    // the resolver is TOTAL — it falls through to the raw node span instead.
+    if (!validZone(z)) continue;
     if (line >= z.startLine && line <= z.endLine) {
       const span = z.endLine - z.startLine;
       if (span < bestZoneSpan) {
@@ -252,6 +316,11 @@ export function inSpanCursor(cursor: number | null, sp: LineSpan): number | null
   // guard. A clarity short-circuit (and the non-null assertion's witness), not a branch.
   // Stryker disable next-line ConditionalExpression
   if (cursor == null) return null;
+  // skip a malformed span (missing/non-numeric endpoint) — an in-span check on a
+  // span with no `.start`/`.end` would throw; this makes the helper TOTAL. The
+  // inversion clause of validLineSpan also rejects an inverted span (no cursor can
+  // be in-span when end < start), so the contract is "honest null on garbage".
+  if (!validLineSpan(sp)) return null;
   // tracked: cute-dbt#517 — equivalent: `cursor >= start` → `> start` differs only
   // when `cursor === start`, where the caller's fallback snaps to `start` = the same
   // value. The `<= end` boundary is NOT suppressed — a real test (cursor past the

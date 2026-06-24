@@ -26,6 +26,7 @@ import {
   type SyncMaps,
   type LineSpan,
   type RawTarget,
+  type ZoneSpan,
 } from "./cursor-sync";
 
 // A span helper — the SourceSpan shape the spine emits (start/end line+col+byte),
@@ -649,6 +650,221 @@ describe("mutation-kill: syncFromCursor each identity conjunct matters", () => {
     // parameter MUST route to different resolvers — a flipped switch would mismatch.
     expect(syncFromCursor(initialSyncState(), MAPS, 10, "compiled").node).toBe("stg_inner");
     expect(syncFromCursor(initialSyncState(), MAPS, 10, "raw").zone).toBe("zone:loop");
+  });
+});
+
+// ── TOTALITY: the resolution helpers must be PANIC-FREE against malformed /
+//    inverted / missing-field span objects (gemini-code-assist #518, cute-dbt#496).
+//    The public types declare start/end/line non-optional, but the maps are built
+//    from a runtime payload — a missing field, a non-numeric line, an inverted
+//    range, or an inherited prototype property must SKIP (never throw, never
+//    mis-resolve). Well-formed input is UNCHANGED (the totality tests above prove
+//    the happy path; these only constrain the malformed path). Each malformed span
+//    is cast through `unknown` because it deliberately violates the static type. ──
+
+// A deliberately-malformed line span (any field may be missing or non-numeric).
+type BadSpan = Partial<{ start: Partial<{ line: unknown }>; end: Partial<{ line: unknown }> }>;
+function bad(sp: BadSpan): LineSpan {
+  return sp as unknown as LineSpan;
+}
+// A deliberately-malformed zone (startLine/endLine may be missing or non-numeric).
+function badZone(z: Record<string, unknown>): SyncMaps["zones"] extends (infer Z)[] | undefined ? Z : never {
+  return z as never;
+}
+
+describe("totality: innermostSpan skips malformed / inverted / inherited-prop spans", () => {
+  // A single WELL-FORMED span the malformed neighbour must not corrupt: line 5 in
+  // only `good` must still resolve to `good` no matter what junk sits beside it.
+  function withJunk(junk: Record<string, LineSpan>): Record<string, LineSpan> {
+    return { good: sp(1, 10), ...junk };
+  }
+  it("skips a span with a MISSING start (no throw, resolves the good span)", () => {
+    const spans = withJunk({ junk: bad({ end: { line: 10 } }) });
+    expect(innermostSpan(spans, 5)).toBe("good");
+  });
+  it("skips a span with a MISSING end (no throw)", () => {
+    const spans = withJunk({ junk: bad({ start: { line: 1 } }) });
+    expect(innermostSpan(spans, 5)).toBe("good");
+  });
+  it("skips a span with a STRING-COERCIBLE start.line (kills isFiniteLine — coercion would otherwise match)", () => {
+    // `{start:"1", end:10}` would, UNGUARDED, match line 5 via JS coercion
+    // (`5 >= "1"` is true) and STEAL it from `good` (negative-ish length wins). The
+    // isFiniteLine guard rejects the string start → `good` wins. Kills the `isFinite`
+    // half + the `typeof` early-return mutants (a string IS resolution-relevant here).
+    const spans = withJunk({ junk: bad({ start: { line: "1" }, end: { line: 10 } }) });
+    expect(innermostSpan(spans, 5)).toBe("good");
+  });
+  it("skips a span with a STRING-COERCIBLE end.line (kills the end-side isFinite guard)", () => {
+    const spans = withJunk({ junk: bad({ start: { line: 1 }, end: { line: "20" } }) });
+    // {start:1, end:"20"} would coerce-match line 5 (len 19 > good's 9, so good wins
+    // the TIE only because the string span is rejected; without the guard it could
+    // still be a candidate). Resolve via good either way → the guard keeps it honest.
+    expect(innermostSpan(spans, 5)).toBe("good");
+  });
+  it("skips an INFINITY-bounded span (kills isFiniteLine `&&`→`||` — Infinity is a number but not finite)", () => {
+    // `{start:1, end:Infinity}` contains EVERY line. The `&&`→`||` mutant of
+    // isFiniteLine accepts it (typeof Infinity === "number" short-circuits the `||`),
+    // making it match line 5 and shadow `good`. The real `Number.isFinite` rejects it.
+    const spans = withJunk({ junk: bad({ start: { line: 1 }, end: { line: Infinity } }) });
+    expect(innermostSpan(spans, 5)).toBe("good"); // good(1..10) is the only VALID span containing 5
+  });
+  it("skips a NaN-lined span (NaN poisons comparisons, but the guard also drops it explicitly)", () => {
+    const spans = withJunk({ junk: bad({ start: { line: NaN }, end: { line: NaN } }) });
+    expect(innermostSpan(spans, 5)).toBe("good");
+  });
+  it("skips a span whose VALUE is null/undefined (kills the `sp != null`→`true` guard, no throw)", () => {
+    // an explicitly-null span value: the `sp != null` conjunct is load-bearing — a
+    // `true` mutant would dereference `sp.start` and THROW. The guard skips it.
+    const spans: Record<string, LineSpan> = { good: sp(1, 10), nullish: null as unknown as LineSpan };
+    expect(innermostSpan(spans, 5)).toBe("good");
+  });
+  it("skips an INVERTED span (end.line < start.line) — kills `end >= start` → drop", () => {
+    // An inverted junk span [20..10] would, unguarded, "contain" line 15 by the
+    // `>= start && <= end` test reading start=20,end=10 as FALSE — but a smaller
+    // NEGATIVE length (10-20=-10 < the good span's 9) would let it WIN the tie if it
+    // ever matched. The inversion guard makes it never a candidate. A junk span
+    // [10..1] would otherwise CONTAIN line 5 (1<=5<=10 after swap reading) and steal
+    // it from `good` with a negative length. The guard rejects it → `good` wins.
+    const spans = withJunk({ junk: bad({ start: { line: 10 }, end: { line: 1 } }) });
+    expect(innermostSpan(spans, 5)).toBe("good");
+  });
+  it("ignores an inherited prototype property on the spans object (kills the hasOwnProperty guard)", () => {
+    // Pollute Object.prototype with an enumerable span-shaped key. A bare `for…in`
+    // would iterate it; hasOwnProperty must skip it. Restored in finally.
+    const proto = Object.prototype as unknown as Record<string, unknown>;
+    proto.polluted = sp(1, 10);
+    try {
+      const spans: Record<string, LineSpan> = { good: sp(3, 4) };
+      // line 5 is OUTSIDE good(3..4); only the polluted span (1..10) would contain
+      // it. With the hasOwnProperty guard the inherited key is skipped → null.
+      expect(innermostSpan(spans, 5)).toBeNull();
+      // and a line inside `good` still resolves to good (own key wins, not polluted).
+      expect(innermostSpan(spans, 3)).toBe("good");
+    } finally {
+      delete proto.polluted;
+    }
+  });
+  it("returns null when EVERY span is malformed (honest none-sentinel, no throw)", () => {
+    const allBad: Record<string, LineSpan> = {
+      a: bad({}),
+      b: bad({ start: { line: 1 } }),
+      c: bad({ start: { line: 5 }, end: { line: 1 } }),
+    };
+    expect(innermostSpan(allBad, 3)).toBeNull();
+  });
+  it("a WELL-FORMED zero-length span (start === end) is STILL valid (not treated as inverted)", () => {
+    // end === start is NOT inverted — a single-line span must still resolve. This
+    // kills an over-strict `end > start` mutant of the inversion guard.
+    expect(innermostSpan({ point: bad({ start: { line: 7 }, end: { line: 7 } }) }, 7)).toBe("point");
+  });
+});
+
+describe("totality: rawTargetForLine skips malformed / inverted zones", () => {
+  it("skips a zone with a MISSING startLine (resolves via the raw node span instead, no throw)", () => {
+    const maps: SyncMaps = {
+      nodeSpans: {},
+      rawNodeSpans: { base: sp(1, 3) },
+      zones: [badZone({ id: "z", endLine: 18, nodeId: "n" })],
+    };
+    // line 2 is in no valid zone → falls through to the raw node span `base`.
+    expect(rawTargetForLine(maps, 2)).toEqual<RawTarget>({ kind: "node", id: "base" });
+  });
+  it("skips a zone with a MISSING endLine (no throw)", () => {
+    const maps: SyncMaps = {
+      nodeSpans: {},
+      rawNodeSpans: { base: sp(1, 3) },
+      zones: [badZone({ id: "z", startLine: 1, nodeId: "n" })],
+    };
+    expect(rawTargetForLine(maps, 2)).toEqual<RawTarget>({ kind: "node", id: "base" });
+  });
+  it("skips a zone with a STRING-COERCIBLE startLine (kills the `z != null ||`/precedence isFinite guards)", () => {
+    // `{startLine:"1", endLine:18}` would, UNGUARDED, coerce-match line 13
+    // (`13 >= "1"` is true) and return its node — STEALING resolution from the raw
+    // node span. The isFiniteLine(startLine) guard rejects the string → falls through
+    // to the raw node `inner`. This is the input where the guard is RESOLUTION-relevant
+    // (kills the `z != null || …` short-circuit + the `&&`-precedence LogicalOperator).
+    const maps: SyncMaps = {
+      nodeSpans: {},
+      rawNodeSpans: { inner: sp(10, 16) },
+      zones: [badZone({ id: "z", startLine: "1", endLine: 18, nodeId: "zone_n" })],
+    };
+    expect(rawTargetForLine(maps, 13)).toEqual<RawTarget>({ kind: "node", id: "inner" });
+  });
+  it("skips a zone with a STRING-COERCIBLE endLine (kills the end-side isFinite guard)", () => {
+    const maps: SyncMaps = {
+      nodeSpans: {},
+      rawNodeSpans: { inner: sp(10, 16) },
+      zones: [badZone({ id: "z", startLine: 1, endLine: "18", nodeId: "zone_n" })],
+    };
+    expect(rawTargetForLine(maps, 13)).toEqual<RawTarget>({ kind: "node", id: "inner" });
+  });
+  it("skips a zone whose VALUE is null (kills the `z != null`→`true` guard, no throw)", () => {
+    // an explicitly-null zone in the array: `z != null` is load-bearing — a `true`
+    // mutant would dereference `z.startLine` and THROW. The guard skips it.
+    const maps: SyncMaps = {
+      nodeSpans: {},
+      rawNodeSpans: { base: sp(1, 3) },
+      zones: [null as unknown as ZoneSpan, { id: "z:good", startLine: 10, endLine: 18, nodeId: "n" }],
+    };
+    expect(rawTargetForLine(maps, 2)).toEqual<RawTarget>({ kind: "node", id: "base" });
+    expect(rawTargetForLine(maps, 13)).toEqual<RawTarget>({ kind: "node", id: "n" }); // valid zone still resolves
+  });
+  it("skips an INVERTED zone (endLine < startLine) — kills `endLine >= startLine` → drop", () => {
+    // An inverted zone [18..10] would otherwise be a candidate; the guard drops it,
+    // so line 2 (outside everything except base) resolves to the raw node `base`.
+    const maps: SyncMaps = {
+      nodeSpans: {},
+      rawNodeSpans: { base: sp(1, 3) },
+      zones: [badZone({ id: "z", startLine: 18, endLine: 10, nodeId: "n" })],
+    };
+    expect(rawTargetForLine(maps, 2)).toEqual<RawTarget>({ kind: "node", id: "base" });
+  });
+  it("a malformed zone does not shadow a VALID zone (the valid one still resolves)", () => {
+    const maps: SyncMaps = {
+      nodeSpans: {},
+      zones: [
+        badZone({ id: "z:bad", startLine: NaN, endLine: NaN, nodeId: "bad_n" }),
+        { id: "z:good", startLine: 10, endLine: 18, nodeId: "good_n" },
+      ],
+    };
+    expect(rawTargetForLine(maps, 13)).toEqual<RawTarget>({ kind: "node", id: "good_n" });
+  });
+  it("a WELL-FORMED zero-length zone (startLine === endLine) is STILL valid", () => {
+    // single-line zone — its sole line is a boundary → selects the zone. Kills an
+    // over-strict `endLine > startLine` inversion mutant.
+    const maps: SyncMaps = { nodeSpans: {}, zones: [{ id: "z", startLine: 7, endLine: 7, nodeId: "n" }] };
+    expect(rawTargetForLine(maps, 7)).toEqual<RawTarget>({ kind: "zone", id: "z" });
+  });
+});
+
+describe("totality: inSpanCursor returns null on a malformed span (no throw)", () => {
+  it("returns null when the span is MISSING start (no throw)", () => {
+    expect(inSpanCursor(5, bad({ end: { line: 10 } }))).toBeNull();
+  });
+  it("returns null when the span is MISSING end", () => {
+    expect(inSpanCursor(5, bad({ start: { line: 1 } }))).toBeNull();
+  });
+  it("returns null when start.line is NON-NUMERIC (kills the typeof/isFinite guard)", () => {
+    expect(inSpanCursor(5, bad({ start: { line: "1" }, end: { line: 10 } }))).toBeNull();
+  });
+  it("returns null when end.line is NON-NUMERIC (string '20' would coerce-match without the guard)", () => {
+    // `5 <= "20"` coerces to true — the guard rejecting the string is load-bearing
+    // (without it inSpanCursor would claim 5 is in [1.."20"]).
+    expect(inSpanCursor(5, bad({ start: { line: 1 }, end: { line: "20" } }))).toBeNull();
+  });
+  it("returns null on an INFINITY end (kills isFiniteLine `&&`→`||`: Infinity is a number, not finite)", () => {
+    // {start:1, end:Infinity} contains 5 (`5 <= Infinity`). The `||` mutant accepts it
+    // and returns 5; the real guard returns null (Infinity is not a finite line).
+    expect(inSpanCursor(5, bad({ start: { line: 1 }, end: { line: Infinity } }))).toBeNull();
+  });
+  it("returns null when start.line is NaN", () => {
+    expect(inSpanCursor(5, bad({ start: { line: NaN }, end: { line: 10 } }))).toBeNull();
+  });
+  it("returns null when the span VALUE is null (kills `sp != null`→`true`, no throw)", () => {
+    expect(inSpanCursor(5, null as unknown as LineSpan)).toBeNull();
+  });
+  it("a WELL-FORMED span still returns the in-span cursor (totality guard does not break the happy path)", () => {
+    expect(inSpanCursor(7, sp(5, 20))).toBe(7);
   });
 });
 
