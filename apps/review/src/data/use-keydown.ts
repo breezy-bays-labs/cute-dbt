@@ -19,6 +19,7 @@ import { routeKey, type DispatchAction, type KeyEventLike } from "../domain/disp
 import { deriveView } from "./nav-slice";
 import { anyOverlayOpen } from "./ui-slice";
 import { viewsFor } from "../domain/matrix";
+import { isInsideShadowOrEditable } from "../domain/diff/shadow-guard";
 
 /**
  * Apply a typed dispatch action to the store. Pulled out (and exported) so it is
@@ -104,6 +105,14 @@ export function useKeydown(): void {
   useEffect(() => {
     function onKey(e: KeyboardEvent): void {
       const st = useAppStore.getState();
+      // RISK#2 (S5): a keystroke whose composedPath crosses the Pierre shadow
+      // root (`diffs-container`) — or any editable field — belongs to THAT
+      // surface; the app dispatcher must not hijack it. This guard sits ABOVE
+      // the pure input-guard rung: it short-circuits BEFORE canonicalization, so
+      // Pierre's own in-shadow key handling (and the Composer textarea) is never
+      // intercepted. (Composer ⌘↵/esc still work — they stopPropagation locally.)
+      const path = e.composedPath?.();
+      if (isInsideShadowOrEditable(path)) return;
       // Canonicalize the physical key through the live (possibly rebound) keymap.
       const canon = makeCanonicalizer(st.keymapOverride);
       // Pierce the shadow DOM: `e.target` is retargeted to the shadow host under

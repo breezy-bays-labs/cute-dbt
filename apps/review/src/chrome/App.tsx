@@ -105,6 +105,13 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   const modelNames = useMemo(() => context.models.map((m) => m.name), [context]);
   const instances: readonly string[] = entity === "models" ? modelNames : [];
 
+  // ── PR reviewers (the comment composer's @-mention picker source) ──────────
+  const reviewers = useMemo(() => {
+    const logins = (context.pr_ref?.reviewers ?? []).map((r) => r.login).filter((l): l is string => !!l);
+    const author = context.pr_ref?.author;
+    return [...new Set([...(author ? [author] : []), ...logins])];
+  }, [context]);
+
   const compiledSql = useMemo(() => {
     if (!model) return "";
     return model.dag.nodes
@@ -226,6 +233,7 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
             ctx={ctx}
             compiledSql={compiledSql}
             shiki={shiki}
+            reviewers={reviewers}
             sel={sel[entity]}
             prScopeByAxis={dataset.prScopeByAxis}
             scopeAxis={scopeAxis}

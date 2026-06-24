@@ -24,7 +24,15 @@ import solarizedLight from "@shikijs/themes/solarized-light";
 
 let corePromise: Promise<HighlighterCore> | null = null;
 
-function core(): Promise<HighlighterCore> {
+/**
+ * The ONE Shiki core for the whole app (council §E "ONE Shiki singleton"). Both
+ * `highlightCode` (the read-only code pane) AND `highlightTokens` (the inline
+ * word-emphasis path in shiki-tokens.ts) resolve THIS singleton — there is
+ * exactly one `createHighlighterCore` in the bundle, with the consolidated 12
+ * themes + sql/yaml langs registered once. Pierre owns its own highlighter for
+ * the diff surface; this owns every plain/token render.
+ */
+export function highlighterCore(): Promise<HighlighterCore> {
   if (!corePromise) {
     corePromise = createHighlighterCore({
       themes: [
@@ -46,6 +54,6 @@ export type CodeLang = "sql" | "yaml";
  * silent fallback.
  */
 export async function highlightCode(code: string, lang: CodeLang, shiki: string): Promise<string> {
-  const hl = await core();
+  const hl = await highlighterCore();
   return hl.codeToHtml(code, { lang, theme: shiki });
 }
