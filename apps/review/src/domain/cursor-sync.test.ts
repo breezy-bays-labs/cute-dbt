@@ -120,6 +120,22 @@ describe("spanForNode — forward lookup (never fabricates)", () => {
   it("returns null for a null id", () => {
     expect(spanForNode(MAPS, null)).toBeNull();
   });
+  // ── SIDE-awareness (cute-dbt#497 finding 1) ──────────────────────────────────
+  it("resolves the RAW span on the raw side (a raw-only node has no compiled span)", () => {
+    // `status_orders` is a RAW-ONLY node — present in rawNodeSpans, ABSENT from
+    // nodeSpans (the analog of a `zone:N` collapse / synthesized `(final select)`).
+    expect(spanForNode(MAPS, "status_orders", "raw")).toEqual(sp(11, 17));
+    // on the compiled side it has no span → honest null (would be a silent no-op).
+    expect(spanForNode(MAPS, "status_orders", "compiled")).toBeNull();
+  });
+  it("picks the SIDE's table for a node that exists in BOTH at different lines", () => {
+    // `final` is compiled 22..30 but raw 20..28 — the side must pick the right one.
+    expect(spanForNode(MAPS, "final", "compiled")).toEqual(sp(22, 30));
+    expect(spanForNode(MAPS, "final", "raw")).toEqual(sp(20, 28));
+  });
+  it("defaults to the compiled side when no side is passed (source-compatible)", () => {
+    expect(spanForNode(MAPS, "final")).toEqual(sp(22, 30));
+  });
 });
 
 describe("rawTargetForLine — raw reverse resolution (zone-vs-node mutual exclusion)", () => {
@@ -231,6 +247,35 @@ describe("syncForward — DAG node → code cursor + scroll nonce (anti-loop)", 
     expect(s.cursor).toBe(22);
     expect(s.scrollNonce).toBe(afterStg.scrollNonce + 1);
     expect(s.lastScrolled).toBe("final");
+  });
+
+  // ── SIDE-aware forward sync (cute-dbt#497 finding 1) ─────────────────────────
+  // On the RAW shelf the DAG carries raw-only ids (`zone:N` collapses, the
+  // synthesized `(final select)`) that are ABSENT from `nodeSpans`. Forward sync
+  // MUST resolve those against `rawNodeSpans` or the scroll/ring-flash is a silent
+  // no-op — the exact bug clicking a {% for %} collapse node on the raw shelf hit.
+  it("RAW side: a raw-only node (absent from nodeSpans) scrolls to its RAW span", () => {
+    // `status_orders` ∈ rawNodeSpans (11..17), ∉ nodeSpans — the zone:N analog.
+    const s0 = selectNode(initialSyncState(), "status_orders");
+    // compiled side (the OLD behavior): no compiled span → silent no-op (the bug).
+    const compiled = syncForward(s0, MAPS, "compiled");
+    expect(compiled).toBe(s0);
+    expect(compiled.scrollNonce).toBe(0);
+    // raw side (the FIX): resolves the raw span → cursor snaps + scroll nonce bumps.
+    const raw = syncForward(s0, MAPS, "raw");
+    expect(raw.cursor).toBe(11); // landed on the raw span start
+    expect(raw.scrollNonce).toBe(s0.scrollNonce + 1); // a fresh node → scroll/flash
+    expect(raw.lastScrolled).toBe("status_orders");
+  });
+  it("RAW side: a node in BOTH tables lands on its RAW span line, not the compiled one", () => {
+    // `final` is compiled 22..30 but raw 20..28 — the raw forward sync uses the raw line.
+    const s = syncForward(selectNode(initialSyncState(), "final"), MAPS, "raw");
+    expect(s.cursor).toBe(20); // raw span start, NOT the compiled 22
+    expect(s.scrollNonce).toBe(1);
+  });
+  it("defaults to the compiled side when no side is passed (source-compatible)", () => {
+    const s = syncForward(selectNode(initialSyncState(), "final"), MAPS);
+    expect(s.cursor).toBe(22); // compiled span start
   });
 });
 

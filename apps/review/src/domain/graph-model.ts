@@ -49,6 +49,11 @@ export interface GraphNode {
   consumer?: boolean;
   /** raw-DAG: this CTE exists ONLY in the raw graph (is_incremental stripped it). */
   incrementalOnly?: boolean;
+  /** raw-DAG: this node is a {% for %} loop COLLAPSE — N compiled CTEs folded into
+   *  one templated node. DISTINCT from `incrementalOnly` (an is_incremental strip):
+   *  a template collapse is not an is_incremental claim, so it must not borrow the
+   *  incremental-amber treatment (cute-dbt#497 finding 3). */
+  templated?: boolean;
   /** raw-DAG: this node carries an is_incremental() guard. */
   hasIncremental?: boolean;
 }
@@ -155,6 +160,9 @@ export function nodeWidth(n: GraphNode): number {
   if (n.mat === "incremental") right = 54;
   else if (n.mat) right = 46;
   else if (n.incrementalOnly) right = 66;
+  // the {% for %} "TEMPLATE" badge (cute-dbt#497 finding 3) reserves the same right
+  // gutter as the "RAW ONLY" badge so a long templated name never sits under it.
+  else if (n.templated) right = 66;
   const nameW = 16 + label.length * 7.8 + right;
   const subW = 16 + sub.length * 6.6 + 64;
   return Math.max(NODE_W, Math.min(NODE_W_MAX, Math.round(Math.max(nameW, subW))));

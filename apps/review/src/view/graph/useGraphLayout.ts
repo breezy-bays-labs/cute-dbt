@@ -48,13 +48,13 @@ export function useGraphLayout(data: GraphData, opts: UseGraphLayoutOpts = {}): 
   const direction = opts.direction ?? RIGHT;
 
   // nodeKey hashes the id PLUS every width-affecting fact (label/sub/mat/
-  // incrementalOnly — the exact inputs `nodeWidth` reads). The effect reads
-  // `data` directly (not in its deps), so a node whose width-affecting facts
+  // incrementalOnly/templated — the exact inputs `nodeWidth` reads). The effect
+  // reads `data` directly (not in its deps), so a node whose width-affecting facts
   // change IN PLACE while its id stays the same must still re-key here, else the
   // layout keeps a stale `nodeWidth` and elk never re-runs. (Id alone would miss
   // an in-place fact change.)
   const nodeKey = JSON.stringify(
-    data.nodes.map((n) => [n.id, n.label, n.sub, n.mat, n.incrementalOnly]),
+    data.nodes.map((n) => [n.id, n.label, n.sub, n.mat, n.incrementalOnly, n.templated]),
   );
   const edgeKey = JSON.stringify(data.edges.map((e) => [e[0], e[1]]));
   const hasZones = !!(data.zones && data.zones.length);

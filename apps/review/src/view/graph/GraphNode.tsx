@@ -148,16 +148,22 @@ function PrNode({ facts, w, selected, focus, dimmed }: GraphNodeData): React.Rea
 /** A structural node (CTE / raw / column DAG): tone stripe + name + sub. */
 function ToneNode({ facts, w, selected, focus, dimmed }: GraphNodeData): React.ReactElement {
   const incOnly = facts.incrementalOnly;
+  // a {% for %} loop COLLAPSE — its own treatment, DISTINCT from incremental-only
+  // (an is_incremental strip). Never borrow the incremental-amber border/badge: a
+  // template collapse is not an is_incremental claim (cute-dbt#497 finding 3).
+  const templated = facts.templated && !incOnly;
   const border = selected
     ? "var(--selected, #e91e63)"
     : incOnly ? "var(--mat-incremental, #e69f00)"
+    : templated ? "var(--legend-6, #8250df)"
     : focus ? "var(--accent, #58a6ff)"
     : facts.provisional ? "var(--text-muted, #6c7086)" : "var(--border, #6c7086)";
-  const dashed = (incOnly && !selected) || facts.provisional || dimmed;
+  const dashed = ((incOnly || templated) && !selected) || facts.provisional || dimmed;
   return (
     <div
       data-testid="graph-node"
       data-tone={facts.tone}
+      data-templated={templated ? "true" : "false"}
       data-provisional={facts.provisional ? "true" : "false"}
       data-selected={selected ? "true" : "false"}
       data-dimmed={dimmed ? "true" : "false"}
@@ -183,6 +189,9 @@ function ToneNode({ facts, w, selected, focus, dimmed }: GraphNodeData): React.R
       </div>
       {incOnly && (
         <div style={{ position: "absolute", right: 10, top: 8, fontSize: 8, fontWeight: 700, letterSpacing: "0.05em", color: "var(--mat-incremental, #e69f00)" }}>RAW ONLY</div>
+      )}
+      {templated && (
+        <div style={{ position: "absolute", right: 10, top: 8, fontSize: 8, fontWeight: 700, letterSpacing: "0.05em", color: "var(--legend-6, #8250df)" }}>TEMPLATE</div>
       )}
       <Handle type="source" position={Position.Right} style={{ opacity: 0 }} />
     </div>
