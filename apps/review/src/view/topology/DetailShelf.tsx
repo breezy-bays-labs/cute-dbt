@@ -105,12 +105,18 @@ export function Segmented<V extends string>({
 const MIN_SIZE = 260;
 const KEY_STEP = 24; // arrow-key resize increment
 
+/** The resize cap — the SAME bound `clampSize` clamps to AND the slider announces
+ *  as `aria-valuemax` (one source of truth so the announced range never drifts
+ *  from the enforced one): 85% of the viewport height when docked to the bottom,
+ *  else 80% of its width. */
+function maxSize(dock: ShelfDock): number {
+  return dock === "bottom"
+    ? (typeof window !== "undefined" ? window.innerHeight : 800) * 0.85
+    : (typeof window !== "undefined" ? window.innerWidth : 1280) * 0.8;
+}
+
 function clampSize(next: number, dock: ShelfDock): number {
-  const cap =
-    dock === "bottom"
-      ? (typeof window !== "undefined" ? window.innerHeight : 800) * 0.85
-      : (typeof window !== "undefined" ? window.innerWidth : 1280) * 0.8;
-  return Math.max(MIN_SIZE, Math.min(cap, next));
+  return Math.max(MIN_SIZE, Math.min(maxSize(dock), next));
 }
 
 function defaultSize(dock: ShelfDock): number {
@@ -200,48 +206,63 @@ export function DetailShelf(props: DetailShelfProps): React.ReactElement {
 
   const [size, setSize] = useState<number>(() => loadSize(dock));
   const dragRef = useRef<{ x0: number; y0: number; s0: number } | null>(null);
+  // the live drag's teardown (set on mousedown, cleared on release). Held in a
+  // ref so the unmount effect below can run it if the shelf unmounts MID-DRAG —
+  // otherwise the window listeners + `body{user-select:none}` would leak app-wide.
+  const cleanupRef = useRef<(() => void) | null>(null);
 
-  // re-seed the size when the dock side flips (the two docks persist separately).
-  const lastDock = useRef(dock);
-  useEffect(() => {
-    if (lastDock.current !== dock) {
-      lastDock.current = dock;
-      setSize(loadSize(dock));
-    }
-  }, [dock]);
+  // re-seed the size when the dock side flips, DURING render (the store-previous-
+  // prop pattern) — not in an effect, so the new dock's clamped size paints in the
+  // same commit (no extra render → no flash when the dock flips). The two docks
+  // persist separately, so re-load the flipped dock's saved size and clamp it.
+  const [prevDock, setPrevDock] = useState(dock);
+  if (dock !== prevDock) {
+    setPrevDock(dock);
+    setSize(clampSize(loadSize(dock), dock));
+  }
 
-  // the global drag listeners — bound only while a drag is live (the prototype's
-  // window mousemove/mouseup). Persists the final size on release.
-  useEffect(() => {
-    function onMove(e: MouseEvent): void {
-      const d = dragRef.current;
-      if (!d) return;
-      const next = bottom ? d.s0 + (d.y0 - e.clientY) : d.s0 + (d.x0 - e.clientX);
-      setSize(clampSize(next, dock));
-    }
-    function onUp(): void {
-      if (dragRef.current) {
-        dragRef.current = null;
-        document.body.style.userSelect = "";
-        setSize((s) => { saveSize(dock, s); return s; });
-      }
-    }
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-    return () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-    };
-  }, [bottom, dock]);
-
-  const onHandleMouseDown = useCallback(
+  // the global drag listeners are bound ONLY while a drag is live (registered on
+  // mousedown, torn down on release) — never standing window listeners. The
+  // teardown also resets `body{user-select}` + clears the drag ref so a release
+  // OR a mid-drag unmount leaves zero global state behind.
+  const startDrag = useCallback(
     (e: React.MouseEvent): void => {
       e.preventDefault();
-      dragRef.current = { x0: e.clientX, y0: e.clientY, s0: size };
+      // a second mousedown should never stack listeners — tear any prior drag down.
+      cleanupRef.current?.();
+      const start = { x0: e.clientX, y0: e.clientY, s0: size };
+      dragRef.current = start;
       document.body.style.userSelect = "none";
+      // capture dock/bottom at drag-start — they cannot change mid-drag.
+      const dragBottom = bottom;
+      const dragDock = dock;
+      const onMove = (ev: MouseEvent): void => {
+        const next = dragBottom ? start.s0 + (start.y0 - ev.clientY) : start.s0 + (start.x0 - ev.clientX);
+        setSize(clampSize(next, dragDock));
+      };
+      const teardown = (): void => {
+        window.removeEventListener("mousemove", onMove);
+        window.removeEventListener("mouseup", onUp);
+        document.body.style.userSelect = "";
+        dragRef.current = null;
+        cleanupRef.current = null;
+      };
+      const onUp = (): void => {
+        // persist the final size, then drop every global trace of the drag.
+        setSize((s) => { saveSize(dragDock, s); return s; });
+        teardown();
+      };
+      window.addEventListener("mousemove", onMove);
+      window.addEventListener("mouseup", onUp);
+      cleanupRef.current = teardown;
     },
-    [size],
+    [size, bottom, dock],
   );
+
+  // unmount-safe: if the shelf unmounts MID-DRAG (a model switch / fullscreen
+  // toggle), run the live teardown so the window listeners + `body{user-select}`
+  // never leak. No-op when no drag is live.
+  useEffect(() => () => cleanupRef.current?.(), []);
 
   // keyboard-resize: ←/→ (side) or ↑/↓ (bottom) grow/shrink; Home/End jump.
   const onHandleKeyDown = useCallback(
@@ -291,8 +312,9 @@ export function DetailShelf(props: DetailShelfProps): React.ReactElement {
           aria-orientation={bottom ? "horizontal" : "vertical"}
           aria-label="Resize the detail shelf"
           aria-valuemin={MIN_SIZE}
+          aria-valuemax={Math.round(maxSize(dock))}
           aria-valuenow={Math.round(size)}
-          onMouseDown={onHandleMouseDown}
+          onMouseDown={startDrag}
           onKeyDown={onHandleKeyDown}
           className={
             "group absolute z-30 flex items-center justify-center focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-sky-500 " +

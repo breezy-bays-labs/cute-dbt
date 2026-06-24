@@ -208,3 +208,51 @@ test("S6c: the first-party detail shelf resizes (keyboard) + docks + goes fullsc
   expect(external, `external requests: ${external.join(", ")}`).toEqual([]);
   expect(consoleErrors, `page errors: ${consoleErrors.join(" | ")}`).toEqual([]);
 });
+
+test("S6c: a MID-DRAG unmount leaves zero global state behind (no body{user-select} leak)", async ({ page }) => {
+  // The unmount-safety contract: the drag listeners are bound only while a drag is
+  // live, and a teardown held in a ref runs on unmount. If the shelf unmounts
+  // MID-DRAG (a model/view switch / fullscreen toggle), the teardown must remove
+  // the window listeners AND reset `document.body.style.userSelect` — otherwise
+  // `<body>{user-select:none}` persists app-wide, silently disabling text
+  // selection across the whole app. This DOM-lifecycle behavior runs only in a
+  // real DOM (the vitest env is `node`, no jsdom), so its home is this e2e — the
+  // documented pattern for the shelf's drag effects (see DetailShelf.test.tsx).
+  const external = await denyExternalNetwork(page);
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (e) => consoleErrors.push("PAGEERROR: " + e.message));
+
+  await page.goto("/index.html", { waitUntil: "networkidle" });
+  await page.waitForSelector('[data-testid="entity-tabs"]');
+  await selectModel(page, "customers");
+  await expect(page.locator('[data-testid="detail-shelf"]')).toBeVisible();
+
+  // ── START a drag and DON'T release it: mousedown on the resize handle sets
+  //    body{user-select:none} + registers the live window listeners. `hover()`
+  //    scrolls the handle into view first (the topology section sits far down the
+  //    scrollable Models page), so the press lands on the handle, not off-screen. ──
+  const handle = page.locator('[data-testid="shelf-resize"]');
+  await handle.hover();
+  await page.mouse.down();
+  // the drag is LIVE — body text-selection is suppressed (the global state).
+  await expect.poll(async () => page.evaluate(() => document.body.style.userSelect), { timeout: 2000 }).toBe("none");
+
+  // ── UNMOUNT the shelf MID-DRAG: ⇧3 switches Models topology → the "data" view,
+  //    unmounting TopologyPanes → DetailShelf while the mouse is still down. ──
+  await page.keyboard.press("Shift+Digit3");
+  await expect(page.locator('[data-testid="tab-data"]')).toHaveAttribute("data-active", "true");
+  await expect(page.locator('[data-testid="detail-shelf"]')).toHaveCount(0);
+
+  // ── the unmount teardown ran: body{user-select} is reset (no app-wide leak). ──
+  await expect.poll(async () => page.evaluate(() => document.body.style.userSelect), { timeout: 2000 }).toBe("");
+
+  // ── NO STRAY LISTENER: a leaked onMove would fire setSize on the unmounted
+  //    component (a React error) AND/OR re-suppress selection. Move + release the
+  //    mouse: body{user-select} must STAY "" and no page error may surface. ──
+  await page.mouse.move(200, 200);
+  await page.mouse.up();
+  await expect.poll(async () => page.evaluate(() => document.body.style.userSelect), { timeout: 1000 }).toBe("");
+
+  expect(external, `external requests: ${external.join(", ")}`).toEqual([]);
+  expect(consoleErrors, `page errors: ${consoleErrors.join(" | ")}`).toEqual([]);
+});

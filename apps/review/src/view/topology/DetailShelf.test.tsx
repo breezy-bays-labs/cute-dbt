@@ -81,6 +81,18 @@ describe("DetailShelf — first-party resizable shelf skeleton", () => {
     expect(handle).toContain('aria-orientation');
   });
 
+  it("the resize slider announces a COMPLETE range (aria-valuemin/now/max all present)", () => {
+    // a `role="separator"` slider with only min+now announces an open-ended range;
+    // aria-valuemax (the same cap clampSize enforces) makes the range complete.
+    const handle = renderShelf().match(/data-testid="shelf-resize"[^>]*>/)?.[0] ?? "";
+    expect(handle).toContain("aria-valuemin=");
+    expect(handle).toContain("aria-valuenow=");
+    expect(handle).toContain("aria-valuemax=");
+    // the cap is a positive bound strictly above the floor (min=260) — a real range.
+    const max = Number(handle.match(/aria-valuemax="(\d+)"/)?.[1] ?? "0");
+    expect(max).toBeGreaterThan(260);
+  });
+
   it("renders the fullscreen + dock toggles (first-party, keyboard-operable)", () => {
     const html = renderShelf();
     expect(html).toContain('data-testid="shelf-fullscreen"');
