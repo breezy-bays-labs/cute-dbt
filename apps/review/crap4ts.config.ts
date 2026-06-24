@@ -18,6 +18,7 @@ export default defineConfig({
     "src/domain/data/cell-diff.ts": 15, // the cell key.t trichotomy (diffSide/cellSide/adaptDiffTable)
     "src/domain/data/col-lineage.ts": 15, // buildColGraph / buildColEdges / confidence folds
     "src/domain/data/raw-spans.ts": 15, // rawDagToGraph byte-span parsing + buildRawSpans
+    "src/domain/cursor-sync.ts": 15, // S6a innermost-span resolution + anti-loop reducers (cute-dbt#496)
   },
   coverageMetric: "line",
   src: ["src"],
