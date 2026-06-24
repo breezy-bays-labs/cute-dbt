@@ -75,3 +75,52 @@ describe("ui slice — codeAnchor nonce discipline", () => {
     expect(get().codeAnchor).toBeNull();
   });
 });
+
+describe("ui slice — code-mode + the running hunk cursor (V1)", () => {
+  const anchors = [
+    { no: 3, side: "additions" as const },
+    { no: 8, side: "deletions" as const },
+  ];
+
+  it("defaults to diff mode + an unset hunk cursor", () => {
+    const { get } = harness();
+    expect(get().codeMode).toBe("diff");
+    expect(get().hunkCursor).toEqual({ index: -1, nonce: 0 });
+  });
+
+  it("setCodeMode switches the mode AND resets the hunk cursor (fresh diff surface)", () => {
+    const { get } = harness();
+    get().stepHunkCursor(anchors, 1); // advance the cursor first
+    expect(get().hunkCursor.index).toBe(0);
+    get().setCodeMode("file");
+    expect(get().codeMode).toBe("file");
+    expect(get().hunkCursor).toEqual({ index: -1, nonce: 0 }); // reset
+  });
+
+  it("stepHunkCursor steps the cursor + bumps the nonce on every step", () => {
+    const { get } = harness();
+    get().stepHunkCursor(anchors, 1);
+    expect(get().hunkCursor.index).toBe(0);
+    expect(get().hunkCursor.nonce).toBe(1);
+    get().stepHunkCursor(anchors, 1);
+    expect(get().hunkCursor.index).toBe(1);
+    expect(get().hunkCursor.nonce).toBe(2);
+    get().stepHunkCursor(anchors, 1); // wrap
+    expect(get().hunkCursor.index).toBe(0);
+    expect(get().hunkCursor.nonce).toBe(3);
+  });
+
+  it("stepHunkCursor on an EMPTY anchor list is a no-op index (-1) but still bumps the nonce", () => {
+    const { get } = harness();
+    get().stepHunkCursor([], 1);
+    expect(get().hunkCursor.index).toBe(-1);
+    expect(get().hunkCursor.nonce).toBe(1);
+  });
+
+  it("resetHunkCursor clears the cursor", () => {
+    const { get } = harness();
+    get().stepHunkCursor(anchors, 1);
+    get().resetHunkCursor();
+    expect(get().hunkCursor).toEqual({ index: -1, nonce: 0 });
+  });
+});

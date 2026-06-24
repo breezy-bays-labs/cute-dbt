@@ -14,6 +14,8 @@
 //   would race the keyboard cursor).
 
 import { produce } from "immer";
+import { stepHunk, type HunkCursor } from "../domain/diff/hunk-cursor";
+import type { NavStart } from "../domain/diff/patch-nav";
 
 /** The overlay flags the ui slice owns. Any TRUE ⇒ the keyboard modal-gate fires. */
 export interface OverlayFlags {
@@ -67,6 +69,13 @@ export interface UiSlice {
   codeAnchor: CodeAnchor | null;
   /** monotonic source for codeAnchor nonces (golden-deterministic, not Date.now). */
   anchorNonce: number;
+  /** the active Models code-surface mode (diff/file) — promoted from App-local
+   *  state to the store so the keyboard dispatcher can gate the diff/thread
+   *  surface keys ([ ] / ⇧R / the hunk cursor) on it (V1). */
+  codeMode: "diff" | "file";
+  /** the running hunk cursor (V1 — the S5 next/prev-hunk deferral). `index===-1`
+   *  is unset; the nonce forces a re-scroll even when the index repeats. */
+  hunkCursor: HunkCursor;
 
   /** toggle one overlay flag. */
   toggleOverlay: (name: keyof OverlayFlags) => void;
@@ -78,9 +87,16 @@ export interface UiSlice {
   closeAllOverlays: () => void;
   /** request a line-anchored diff open (bumps the nonce so repeats re-anchor). */
   setCodeAnchor: (anchor: Omit<CodeAnchor, "nonce"> | null) => void;
+  /** set the Models code-surface mode (diff/file). Resets the hunk cursor (a new
+   *  mode is a fresh diff surface). */
+  setCodeMode: (mode: "diff" | "file") => void;
+  /** step the running hunk cursor over the given anchors (the [ / ] keys). */
+  stepHunkCursor: (anchors: readonly NavStart[], dir: 1 | -1) => void;
+  /** reset the hunk cursor (e.g. switching model / file). */
+  resetHunkCursor: () => void;
 }
 
-export const UI_DEFAULTS: { overlays: OverlayFlags } = {
+export const UI_DEFAULTS: { overlays: OverlayFlags; codeMode: "diff" | "file"; hunkCursor: HunkCursor } = {
   overlays: {
     palette: false,
     settings: false,
@@ -90,6 +106,8 @@ export const UI_DEFAULTS: { overlays: OverlayFlags } = {
     scope: false,
     shelf: false,
   },
+  codeMode: "diff",
+  hunkCursor: { index: -1, nonce: 0 },
 };
 
 export type UiSliceSet = (
@@ -102,6 +120,8 @@ export function createUiSlice(set: UiSliceSet, get: UiSliceGet): UiSlice {
     overlays: { ...UI_DEFAULTS.overlays },
     codeAnchor: null,
     anchorNonce: 0,
+    codeMode: UI_DEFAULTS.codeMode,
+    hunkCursor: { ...UI_DEFAULTS.hunkCursor },
 
     toggleOverlay: (name) =>
       set(
@@ -137,5 +157,16 @@ export function createUiSlice(set: UiSliceSet, get: UiSliceGet): UiSlice {
       const nonce = get().anchorNonce + 1;
       set({ codeAnchor: { ...anchor, nonce }, anchorNonce: nonce });
     },
+    setCodeMode: (mode) =>
+      // a new code-mode is a fresh diff surface — reset the running hunk cursor.
+      set({ codeMode: mode, hunkCursor: { index: -1, nonce: 0 } }),
+    stepHunkCursor: (anchors, dir) =>
+      set((s) => {
+        const index = stepHunk(anchors, s.hunkCursor.index, dir);
+        // bump the nonce on EVERY step (even when the index repeats — e.g. a
+        // single-anchor wrap onto itself — so the view re-scrolls deterministically).
+        return { hunkCursor: { index, nonce: s.hunkCursor.nonce + 1 } };
+      }),
+    resetHunkCursor: () => set({ hunkCursor: { index: -1, nonce: 0 } }),
   };
 }

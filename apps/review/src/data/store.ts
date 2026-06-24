@@ -24,16 +24,25 @@ import {
   type SettingsSlice,
   type Settings,
 } from "./settings-slice";
+import { createReviewSlice, REVIEW_DEFAULTS, sanitizeReviewState, type ReviewSlice } from "./review-slice";
 import { DENY_REBIND_KEYS, type Keymap } from "../domain/keymap";
 import type { Entity } from "../domain/keymap";
 import type { View } from "../domain/matrix";
+import type { ReviewState } from "../domain/review/review-machine";
+
+/**
+ * The I/O-boundary clock the review slice's publish stamps the checkpoint with.
+ * Threaded in here (the store IS the I/O boundary) so the review DOMAIN never
+ * calls `Date.now()` itself — the golden-determinism rule. Overridable for tests.
+ */
+export const nowIso = (): string => new Date().toISOString();
 
 /** The persist namespace + version. Bump the version whenever a `migrate` is needed. */
 export const PERSIST_KEY = "cute-dbt:review";
 export const PERSIST_VERSION = 2;
 
-/** The full app state — the 6-slice union (nav · ui · settings · keymap · data). */
-export type AppState = NavSlice & UiSlice & SettingsSlice & KeymapSlice & DataSlice;
+/** The full app state — the 7-slice union (nav · ui · settings · keymap · data · review). */
+export type AppState = NavSlice & UiSlice & SettingsSlice & KeymapSlice & DataSlice & ReviewSlice;
 
 /**
  * Sanitize a persisted keymap override on hydration (unchanged from S1): drop any
@@ -66,6 +75,8 @@ interface PersistedShape {
   keymapOverride: Keymap;
   /** the active context source — the durable replacement for the module global. */
   activeSource: DataSource;
+  /** the review-flow state (reviewed/pending/published/resolved/checkpoint) — V1. */
+  review: ReviewState;
 }
 
 /** What we write out (`partialize`) — the durable subset, under the prototype's key names. */
@@ -78,6 +89,7 @@ function partialize(s: AppState): PersistedShape {
     settings: s.settings,
     keymapOverride: s.keymapOverride,
     activeSource: s.activeSource,
+    review: s.review,
   };
 }
 
@@ -118,6 +130,9 @@ export function hydrateMerge(persisted: unknown): Partial<AppState> {
   // active source: fail-closed to the default if the persisted value isn't a
   // known source (a renamed/removed fixture in an old blob degrades gracefully).
   out.activeSource = isDataSource(p.activeSource) ? p.activeSource : DATA_DEFAULTS.activeSource;
+  // review-flow state: sanitized fail-closed (a corrupt/partial blob → a clean
+  // empty review state; each sub-field degrades in place; maps rebuilt null-proto).
+  out.review = sanitizeReviewState(p.review);
 
   return out;
 }
@@ -159,6 +174,8 @@ export function migratePersisted(persisted: unknown, version: number): Partial<A
       keymapOverride: sanitizeKeymapOverride(p.keymapOverride),
       // activeSource is new in S3b — a v1 blob predates it; start at the default.
       activeSource: DATA_DEFAULTS.activeSource,
+      // review is new in V1 — a v1 blob predates the review flow; start empty.
+      review: REVIEW_DEFAULTS.review,
     };
     return migrated as unknown as Partial<AppState>;
   }
@@ -223,6 +240,11 @@ export const useAppStore = create<AppState>()(
       ...createDataSlice((partial) =>
         set(partial as Partial<AppState> | ((s: AppState) => Partial<AppState>)),
       ),
+      ...createReviewSlice(
+        (partial) => set(partial as Partial<AppState> | ((s: AppState) => Partial<AppState>)),
+        get as () => ReviewSlice,
+        nowIso,
+      ),
     }),
     {
       name: PERSIST_KEY,
@@ -250,4 +272,4 @@ export const useAppStore = create<AppState>()(
 );
 
 // Re-export the defaults for tests + the chrome.
-export { SETTINGS_DEFAULTS, NAV_DEFAULTS, UI_DEFAULTS };
+export { SETTINGS_DEFAULTS, NAV_DEFAULTS, UI_DEFAULTS, REVIEW_DEFAULTS };

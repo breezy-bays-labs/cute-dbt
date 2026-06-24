@@ -14,9 +14,24 @@ import {
   viewActionFor,
   viewAtDigit,
   routeTarget,
+  isRoutable,
   type View,
 } from "./matrix";
 import type { Entity } from "./keymap";
+
+describe("isRoutable — positional OR off-matrix-but-resolvable", () => {
+  it("a positional view is routable", () => {
+    expect(isRoutable("models", "topology")).toBe(true);
+    expect(isRoutable("pr", "files")).toBe(true);
+  });
+  it("Models `code` is routable though it is OFF the AVAIL matrix (the V1 review surface)", () => {
+    expect(isRoutable("models", "code")).toBe(true);
+  });
+  it("a genuinely unavailable pair is NOT routable", () => {
+    expect(isRoutable("models", "files")).toBe(false);
+    expect(isRoutable("macros", "topology")).toBe(false);
+  });
+});
 
 describe("AVAIL — the matrix shape", () => {
   it("covers exactly the five entities", () => {

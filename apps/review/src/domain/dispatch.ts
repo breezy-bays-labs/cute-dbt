@@ -32,7 +32,7 @@
 // onto the shift layer).
 
 import { AVAIL, type View } from "./matrix";
-import type { Entity } from "./keymap";
+import { inThreads, type Entity, type KbContext } from "./keymap";
 
 /** A DOM-independent keyboard event (the subset the ladder reads). */
 export interface KeyEventLike {
@@ -58,6 +58,10 @@ export interface DispatchInput {
   view: View;
   /** true when ANY overlay is open (the modal gate). */
   modal: boolean;
+  /** the active code-surface mode (diff/file) — drives the diff/thread surface
+   *  predicates (the V1 hunk cursor + keyboard-resolve gate). Absent on non-code
+   *  surfaces; the predicates read it as "no diff surface" honestly. */
+  codeMode?: "diff" | "file";
 }
 
 /**
@@ -79,6 +83,12 @@ export type DispatchAction =
   | { kind: "set-data-mode"; mode: "diff" | "file" }
   | { kind: "toggle-panel" }
   | { kind: "mark-reviewed-advance" }
+  // ── V1 review-flow intents (council MUST-FIX D — "build the VERB") ─────────
+  | { kind: "next-unreviewed" }
+  | { kind: "prev-unreviewed" }
+  | { kind: "resolve-from-keyboard" }
+  /** step the running hunk cursor — the S5 next/prev-hunk deferral V1 owns. */
+  | { kind: "step-hunk"; dir: 1 | -1 }
   | { kind: "context"; action: string };
 
 /** The overlay flags the ui slice owns (any open ⇒ modal gate). */
@@ -204,9 +214,23 @@ function rungViewKeys(ev: KeyEventLike, st: DispatchInput): DispatchResult | nul
 /** rung 8: the surface-scoped context keys (instance cycle, mode, panel, …). */
 function rungContextKeys(k: string, st: DispatchInput): DispatchResult | null {
   const notPr = st.entity !== "pr";
-  if (notPr && (k === "n" || k === "N")) return claim({ kind: "cycle-instance", dir: k === "n" ? 1 : -1 });
-  if (notPr && (k === "b" || k === "B")) return claim({ kind: "cycle-instance", dir: k === "b" ? -1 : 1 });
+  // the KbContext the keymap surface-predicates evaluate against (the SSOT — the
+  // dispatcher never re-expresses inThreads/isCodeDiff; it imports them).
+  const kbCtx: KbContext = { entity: st.entity, view: st.view, codeMode: st.codeMode };
+  // lowercase n/b cycle the instance; SHIFT-layer N/B are the V1 next/prev-
+  // UNREVIEWED review-flow jumps (council MUST-FIX D — the registry's def N/B).
+  if (notPr && k === "n") return claim({ kind: "cycle-instance", dir: 1 });
+  if (notPr && k === "b") return claim({ kind: "cycle-instance", dir: -1 });
+  if (notPr && k === "N") return claim({ kind: "next-unreviewed" });
+  if (notPr && k === "B") return claim({ kind: "prev-unreviewed" });
   if (notPr && k === "x") return claim({ kind: "mark-reviewed-advance" });
+  // ⇧R — the keyboard-resolve flow verb. Live only in a thread surface (the
+  // topology shelf or the Models code diff) per the registry's `resolve` `when`.
+  if (k === "R" && inThreads(kbCtx)) return claim({ kind: "resolve-from-keyboard" });
+  // [ / ] — step the running hunk cursor (the S5 next/prev-hunk deferral V1 owns).
+  // Live wherever a thread/diff surface is (inThreads): the topology shelf + the
+  // Models code diff. (S6 will extend the cursor to PR sections; V1 owns the diff.)
+  if ((k === "[" || k === "]") && inThreads(kbCtx)) return claim({ kind: "step-hunk", dir: k === "[" ? -1 : 1 });
   if (notPr && (k === "d" || k === "f")) {
     if (st.view === "code") return claim({ kind: "set-code-mode", mode: k === "d" ? "diff" : "file" });
     if (st.view === "data") return claim({ kind: "set-data-mode", mode: k === "d" ? "diff" : "file" });

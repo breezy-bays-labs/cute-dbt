@@ -20,6 +20,34 @@ import { deriveView } from "./nav-slice";
 import { anyOverlayOpen } from "./ui-slice";
 import { viewsFor } from "../domain/matrix";
 import { isInsideShadowOrEditable } from "../domain/diff/shadow-guard";
+import { dataSlice } from "./data-slice";
+import { parsePatchNav } from "../domain/diff/patch-nav";
+import { nextUnreviewed, prevUnreviewed } from "../domain/review/review-machine";
+import type { AppState } from "./store";
+
+// ── V1 flow-handler helpers (data layer; pure derivations off the live store) ──
+
+/** The in-scope model list (the review LOOP's scope) for the active context. */
+export function reviewScope(st: AppState): string[] {
+  // the PR-scope selectable set is the review scope when present (the in-scope
+  // models the reviewer walks); fall back to every model the dataset carries.
+  const ds = dataSlice(st.activeSource);
+  return ds.prSelectable.length ? ds.prSelectable : ds.MODELS;
+}
+
+/**
+ * Advance the Models selection to a flow target (next/prev-unreviewed). Pure
+ * routing of the review-machine result into the nav + ui state: select the
+ * target model, switch to the code/diff surface (so the reviewer lands ON a
+ * reviewable diff), and reset the hunk cursor for the fresh file. A null target
+ * (loop complete / nothing to advance to) is an honest no-op.
+ */
+function advanceTo(st: AppState, target: string | null): void {
+  if (target == null) return;
+  st.setSel(target, "models");
+  st.setView("code");
+  st.setCodeMode("diff");
+}
 
 /**
  * Apply a typed dispatch action to the store. Pulled out (and exported) so it is
@@ -53,28 +81,117 @@ export function applyDispatch(action: DispatchAction): void {
       st.setView(action.view);
       return;
     }
-    case "cycle-instance":
-      // S2 has no instance list yet (that's the data slice / reshapers, S3). The
-      // intent is routed + claimed; the concrete cycle wires in when the ordered
-      // instance list exists. No-op store-side for now (honest: the key is live,
-      // the motion lands with its data).
-      return;
     case "set-code-mode":
+      // V1: the Models code-surface mode now lives in the store (the dispatcher
+      // gates [ ] / ⇧R / the hunk cursor on it). Resets the hunk cursor.
+      st.setCodeMode(action.mode);
+      return;
     case "set-data-mode":
-      // code/data mode is a per-surface ui concern that lands with the Code/Data
-      // surfaces (S5/S7). Routed + claimed here; no store field yet.
+      // the Data-view mode lands with the Data surface (S7). Routed; no store field yet.
       return;
     case "toggle-panel":
       st.toggleOverlay("shelf");
       return;
+    case "cycle-instance":
     case "mark-reviewed-advance":
-      // the review FLOW verb — its store wiring lands with the review slice (V1).
+    case "next-unreviewed":
+    case "prev-unreviewed":
+    case "resolve-from-keyboard":
+    case "step-hunk":
+      // the V1 review-flow verbs — delegated to applyReviewFlow so applyDispatch
+      // stays a flat, low-complexity router (the dispatch CRAP ceiling).
+      applyReviewFlow(st, action);
       return;
     case "context":
-      // a surface-scoped context key (hunk/thread nav, …) — its handler lands
-      // with the owning surface. Routed through the ONE dispatcher; no-op here.
+      // a surface-scoped context key (thread nav, …) — its handler lands with the
+      // owning surface. Routed through the ONE dispatcher; no-op here.
       return;
   }
+}
+
+/** The V1 review-flow action subset applyReviewFlow handles. */
+type ReviewFlowAction = Extract<
+  DispatchAction,
+  { kind: "cycle-instance" | "mark-reviewed-advance" | "next-unreviewed" | "prev-unreviewed" | "resolve-from-keyboard" | "step-hunk" }
+>;
+
+/**
+ * Apply a V1 review-flow verb against the store. Split out of applyDispatch so
+ * the top-level router stays low-complexity (the dispatch CRAP ceiling). Each
+ * verb is Models-scoped (the reviewable entity in V1) and an honest no-op when
+ * its precondition (a selected model / a scope / a focusable thread) isn't met.
+ */
+export function applyReviewFlow(st: AppState, action: ReviewFlowAction): void {
+  switch (action.kind) {
+    case "cycle-instance": {
+      // the ordered instance cycle over the in-scope model list (Models only;
+      // other entities' instance lists land with their slices). Wraps.
+      if (st.entity !== "models") return;
+      const scope = reviewScope(st);
+      if (!scope.length) return;
+      const cur = st.sel.models;
+      const at = cur ? scope.indexOf(cur) : -1;
+      const from = at >= 0 ? at : action.dir > 0 ? -1 : 0;
+      const next = scope[(((from + action.dir) % scope.length) + scope.length) % scope.length];
+      if (next) st.setSel(next, "models");
+      return;
+    }
+    case "mark-reviewed-advance":
+      // mark the current model reviewed AND advance to the next-unreviewed model.
+      if (st.entity !== "models" || !st.sel.models) return;
+      advanceTo(st, st.markReviewedAdvance(reviewScope(st), st.sel.models));
+      return;
+    case "next-unreviewed":
+      if (st.entity !== "models" || !st.sel.models) return;
+      advanceTo(st, nextUnreviewed(st.review, reviewScope(st), st.sel.models));
+      return;
+    case "prev-unreviewed":
+      if (st.entity !== "models" || !st.sel.models) return;
+      advanceTo(st, prevUnreviewed(st.review, reviewScope(st), st.sel.models));
+      return;
+    case "resolve-from-keyboard":
+      // the ⇧R keyboard-resolve verb: toggle the focused thread's resolved state.
+      resolveFocusedThread(st);
+      return;
+    case "step-hunk":
+      // step the running hunk cursor over the active model's change-run anchors
+      // (the S5 next/prev-hunk deferral V1 owns). Empty/absent patch → no-op.
+      st.stepHunkCursor(activeAnchors(st), action.dir);
+      return;
+  }
+}
+
+/** The active model's change-run anchors (parsed from its committed patch). */
+export function activeAnchors(st: AppState): ReturnType<typeof parsePatchNav>["starts"] {
+  const model = st.sel.models;
+  if (!model) return [];
+  const rec = dataSlice(st.activeSource).D[model];
+  if (!rec) return [];
+  return parsePatchNav(rec.patch).starts;
+}
+
+/**
+ * Resolve (toggle) the focused thread on the active model. The focus target is
+ * the live comment at the running hunk-cursor anchor line; failing that, the
+ * model's first live comment line. Honest no-op when the model has no live
+ * thread. (V1: the keyboard-resolve verb the prototype's mouse-only resolve
+ * lacked — FEATURE-GAP P2#6.)
+ */
+export function resolveFocusedThread(st: AppState): void {
+  const model = st.sel.models;
+  if (!model) return;
+  const rec = dataSlice(st.activeSource).D[model];
+  if (!rec || !rec.comments.length) return;
+  const anchors = activeAnchors(st);
+  const idx = st.hunkCursor.index;
+  const anchorLine = idx >= 0 && idx < anchors.length ? anchors[idx]?.no : undefined;
+  // prefer a comment AT the cursor's anchor line; else the first live comment.
+  const focused =
+    (anchorLine != null ? rec.comments.find((c) => c.line === anchorLine) : undefined) ?? rec.comments[0];
+  const line = focused?.line;
+  if (line == null) return;
+  const currently = st.review.resolved[`${model}@${line}`] === true;
+  st.setThreadResolved(model, line, !currently);
 }
 
 /**
@@ -137,6 +254,9 @@ export function useKeydown(): void {
         entity: st.entity,
         view,
         modal: anyOverlayOpen(st.overlays),
+        // the active code-surface mode — gates the diff/thread surface keys
+        // ([ ] / ⇧R / the hunk cursor) on the Models code diff (V1).
+        codeMode: st.codeMode,
       });
       if (result.preventDefault) e.preventDefault();
       if (result.action) applyDispatch(result.action);

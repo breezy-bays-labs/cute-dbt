@@ -18,7 +18,7 @@
 // the model set) — the exact bug the split exists to prevent.
 
 import { produce } from "immer";
-import { defaultViewFor, viewsFor, type View } from "../domain/matrix";
+import { defaultViewFor, isRoutable, type View } from "../domain/matrix";
 import type { Entity } from "../domain/keymap";
 
 /** A point in navigation history — the (entity, view, sel) tuple, JSON-snapshotted. */
@@ -62,14 +62,21 @@ export interface NavSlice {
 }
 
 /**
- * The DERIVED active view for an entity: its remembered view if available, else
+ * The DERIVED active view for an entity: its remembered view if ROUTABLE, else
  * the entity's first matrix view. This is the `view = viewMap[entity] ||
  * AVAIL[entity][0]` rule from the prototype, made a pure selector so no consumer
  * stores a bare `view`.
+ *
+ * "Routable" (not just "in AVAIL") so an OFF-MATRIX-but-reachable remembered view
+ * — Models `code`, the V1 keyboard-review surface set by mark-reviewed-advance /
+ * next-unreviewed — survives instead of snapping back to topology. A genuinely
+ * unavailable view (e.g. Models `files`) still falls back to the default. This
+ * mirrors the prototype, which never validated the remembered view against AVAIL
+ * (so `setViewMap({models:"code"})` rendered the code surface).
  */
 export function deriveView(viewMap: Record<Entity, View>, entity: Entity): View {
   const remembered = viewMap[entity];
-  if (remembered && viewsFor(entity).includes(remembered)) return remembered;
+  if (remembered && isRoutable(entity, remembered)) return remembered;
   return defaultViewFor(entity);
 }
 

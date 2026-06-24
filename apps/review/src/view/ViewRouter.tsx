@@ -17,6 +17,7 @@ import { DiffViewer } from "./DiffViewer";
 import { LineageGraph } from "./LineageGraph";
 import { CodePane } from "./CodePane";
 import { PrScopeLineage } from "./graph/PrScopeLineage";
+import { ModelReviewSurface } from "./review/ModelReviewSurface";
 
 export interface ViewRouterProps {
   entity: Entity;
@@ -43,6 +44,15 @@ export interface ViewRouterProps {
   /** route OUT to a seed/macro node's own entity — carries the KIND so the sink
    *  lands on the MATCHING entity (seed → Seeds, macro → Macros). */
   onOpenNode?: (id: string, nodeKind: NodeKind) => void;
+  // ── V1 review-flow props (the Models reviewable surface) ──────────────────
+  /** the REAL reviewed state for the active model (from the review slice). */
+  modelReviewed?: boolean;
+  /** the REAL pending-draft count for the active model. */
+  modelDraftCount?: number;
+  /** add a pending draft on the active model — wired to `addReviewDraft`. */
+  onDraft?: (draft: { path: string; line: number; side: "old" | "new"; body: string }) => void;
+  /** mark the active model reviewed + advance — wired to `markReviewedAdvance`. */
+  onMarkReviewed?: () => void;
 }
 
 /** An honest "this surface lands in a later slice" placeholder body. */
@@ -99,7 +109,24 @@ export function ViewRouter(p: ViewRouterProps): React.ReactElement {
     case "models-data":
       return <Placeholder label="Models · Unit tests" detail={`Unit-test data for ${p.sel ?? "—"}`} />;
     case "models-code":
-      return <Placeholder label="Models · Code" detail={`Code diff for ${p.sel ?? "—"} (reachable, off-tab)`} />;
+      // V1: the Models code/diff REVIEWABLE surface — the thin vertical that
+      // makes Models reviewable end-to-end (council MUST-FIX D). The keyboard
+      // review LOOP lands here (next-unreviewed / mark-reviewed-advance switch to
+      // the code view); it carries the diff + a draft composer + the reviewed chip.
+      return p.ctx && p.model ? (
+        <ModelReviewSurface
+          model={p.model.name}
+          ctx={p.ctx}
+          shiki={p.shiki}
+          reviewers={p.reviewers}
+          reviewed={p.modelReviewed ?? false}
+          draftCount={p.modelDraftCount ?? 0}
+          onDraft={(d) => p.onDraft?.(d)}
+          onMarkReviewed={() => p.onMarkReviewed?.()}
+        />
+      ) : (
+        <Placeholder label="Models · Code" detail={`Code diff for ${p.sel ?? "—"} (no context)`} />
+      );
     case "pr-overview":
       return <Placeholder label="PR · Overview" />;
     case "pr-lineage":
