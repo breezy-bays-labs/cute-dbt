@@ -26,10 +26,18 @@ const PURPLE = "var(--legend-6, #8250df)";
 const MUTED = "var(--text-muted, #6c7086)";
 
 /** The chip color + label per presence state — presentation only; the honesty
- *  fact (`presence`/`incrementalOnly`) is the data attribute the gate reads. */
+ *  fact (`presence`/`incrementalOnly`) is the data attribute the gate reads.
+ *
+ *  The chip MUST agree with the body's tri-branch below (never-a-false-claim): a
+ *  PURPLE "templated · N CTEs" fan-out chip is shown ONLY when the loop actually
+ *  generated CTEs (`presence === "compiled_in" && generated`). A `compiled_in`
+ *  zone that generated NONE (a 0-CTE wrapper, e.g. order_status_pivot's outer
+ *  `for region` loop) is structurally a wrapper region — it must render the MUTED
+ *  wrapper chip + the wrapper body, never a purple "templated · 0 CTEs" claim. */
 function chipStyle(t: ZonePresenceTreatment): { color: string; label: string } {
   if (t.presence === "compiled_out") return { color: AMBER, label: "incremental-only" };
-  if (t.presence === "compiled_in") return { color: PURPLE, label: "templated · " + t.genCount + " CTEs" };
+  if (t.presence === "compiled_in" && t.generated)
+    return { color: PURPLE, label: "templated · " + t.genCount + " CTEs" };
   return { color: MUTED, label: "wrapper region" };
 }
 

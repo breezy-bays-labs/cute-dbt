@@ -105,6 +105,29 @@ describe("classifyZonePresence", () => {
     // a compiled_out incremental_guard is also an incremental-only treatment.
     expect(t.incrementalOnly).toBe(true);
   });
+
+  it("a STRUCTURAL incremental_guard is described as a guard region, NOT a {% for %} wrapper (wrong-kind copy)", () => {
+    // order_events_enriched_incremental raw_zones[1] — a structural incremental_guard
+    // that is PRESENT this build (presence:"structural", not compiled_out). The
+    // explainer must name is_incremental()/guard — never the for-loop wrapper copy.
+    const guard: RawZone = { kind: "incremental_guard", presence: "structural" };
+    const t = classifyZonePresence(guard, 1, { "zone:1": [] });
+    expect(t.kind).toBe("incremental_guard");
+    expect(t.presence).toBe("structural");
+    expect(t.incrementalOnly).toBe(false);
+    // honest guard copy — names is_incremental(), NOT a "{% for %} wrapper region".
+    expect(t.explainer).toMatch(/is_incremental|guard/i);
+    expect(t.explainer).not.toMatch(/\{%\s*for\s*%\}\s*wrapper|for %} wrapper region/i);
+  });
+
+  it("a STRUCTURAL for_loop keeps the {% for %} wrapper-region copy (kind-faithful)", () => {
+    const t = classifyZonePresence(forLoop("structural", { loop: "for region in regions" }), 1, { "zone:1": [] });
+    expect(t.kind).toBe("for_loop");
+    expect(t.presence).toBe("structural");
+    // a real for-loop wrapper STILL reads as a {% for %} wrapper region.
+    expect(t.explainer).toMatch(/for %} wrapper region|wrapper region/i);
+    expect(t.explainer).not.toMatch(/is_incremental/i);
+  });
 });
 
 describe("zonePresenceTreatments", () => {

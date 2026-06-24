@@ -94,6 +94,19 @@ test("S6c: zone ring click-through + fan-out collapse (the real looped model)", 
     { timeout: 2000 },
   ).toBe("true");
 
+  // ── NEVER-A-FALSE-CLAIM: order_status_pivot's outer `for region` loop is
+  //    presence "compiled_in" but generated NO CTE of its own (the nested loop
+  //    does) — node_map.raw["zone:1"] = []. Its zone-presence card must render the
+  //    honest WRAPPER treatment, NEVER a purple "templated · 0 CTEs" fan-out chip
+  //    sitting next to a body that denies any CTE. The harness mounts the full
+  //    ZonePresenceList, so this contradiction is reachable live. ──
+  const presenceList = page.locator('[data-testid="zone-presence-list"]');
+  await expect(presenceList).toBeAttached();
+  // a 0-CTE compiled_in chip must never claim "templated · 0 CTEs".
+  await expect(presenceList.getByText(/templated · 0 CTEs/)).toHaveCount(0);
+  // the compiled_in card that DID generate names its real fan-out count instead.
+  await expect(presenceList.locator('[data-testid="zone-presence"][data-presence="compiled_in"]').first()).toBeAttached();
+
   expect(external, `external requests: ${external.join(", ")}`).toEqual([]);
   expect(consoleErrors, `page errors: ${consoleErrors.join(" | ")}`).toEqual([]);
 });
@@ -121,6 +134,15 @@ test("S6c: the compiled_out incremental-only explainer (honest 3-state, never a 
   await expect(explainer).toBeVisible();
   await expect(explainer).toContainText(/is_incremental/i);
   await expect(explainer).toContainText(/compile|strip/i);
+
+  // ── WRONG-KIND COPY: order_events_enriched_incremental ALSO carries a STRUCTURAL
+  //    incremental_guard zone (raw_zones[1]). Its card must read as a GUARD region
+  //    (naming is_incremental()), NEVER "A {% for %} wrapper region" — a for-loop
+  //    description applied to an is_incremental guard is a copy fabrication. ──
+  const structuralGuard = page.locator('[data-testid="zone-presence"][data-presence="structural"]').first();
+  await expect(structuralGuard).toBeAttached();
+  await expect(structuralGuard).toContainText(/is_incremental|guard/i);
+  await expect(structuralGuard).not.toContainText(/\{% for %\} wrapper region/i);
 
   expect(external, `external requests: ${external.join(", ")}`).toEqual([]);
 });

@@ -76,7 +76,12 @@ function explainerFor(presence: Presence, generated: boolean, kind: RawZoneKind)
   if (presence === "compiled_in" && generated) {
     return "This {% for %} loop expands into the templated CTEs below — the compiled DAG collapses the fan-out into one templated node.";
   }
-  // structural / wrapper: present, but templates a region, not a node of its own.
+  // structural / wrapper: present this build, but emits no CTE of its own. The
+  // copy MUST be kind-faithful — an incremental_guard is an {% if is_incremental() %}
+  // region, NOT a {% for %} wrapper (mirror the kind-awareness in compiled_out).
+  if (kind === "incremental_guard") {
+    return "An {% if is_incremental() %} guard region — present this build, it scopes the rows the model writes rather than generating a CTE of its own.";
+  }
   return "A {% for %} wrapper region — it templates the loops inside it; it emits no CTE of its own.";
 }
 

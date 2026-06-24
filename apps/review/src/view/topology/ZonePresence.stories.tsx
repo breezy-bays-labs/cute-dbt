@@ -35,8 +35,21 @@ const COMPILED_OUT: ZonePresenceTreatment = zonePresenceTreatments(
   { "zone:0": [] },
 )[0]!;
 
+// order_status_pivot zone:1 — drawn straight from the real fixture: the outer
+// `for region` loop is presence "compiled_in" (carried VERBATIM) yet generates NO
+// CTE of its own (node_map.raw["zone:1"] = []) — the nested `for status` does. The
+// honest treatment is a wrapper region; the chip MUST NOT claim "templated · 0
+// CTEs" (the never-a-false-claim contradiction this slice prevents).
 const STRUCTURAL: ZonePresenceTreatment = zonePresenceTreatments(
-  [{ kind: "for_loop", presence: "structural", loop: "for region in regions", start: span(13), end: span(19) }],
+  [{ kind: "for_loop", presence: "compiled_in", loop: "for region in regions", template: null, start: span(13), end: span(19) }],
+  { "zone:0": [] },
+)[0]!;
+
+// order_events_enriched_incremental zone:1 — a STRUCTURAL incremental_guard
+// (an {% if is_incremental() %} region present THIS build). It must read as a
+// guard region, never a "{% for %} wrapper region" (wrong-kind copy).
+const STRUCTURAL_GUARD: ZonePresenceTreatment = zonePresenceTreatments(
+  [{ kind: "incremental_guard", presence: "structural", start: span(41), end: span(63) }],
   { "zone:0": [] },
 )[0]!;
 
@@ -49,11 +62,16 @@ export const CompiledIn = (): React.ReactElement => <ZonePresence treatment={COM
  *  never a fabricated CTE list. DISTINCT from a compiled_in TEMPLATE collapse. */
 export const CompiledOutIncrementalOnly = (): React.ReactElement => <ZonePresence treatment={COMPILED_OUT} />;
 
-/** structural — a wrapper region that templates the loops inside it; it emits no
- *  CTE of its own. Present, but never incremental-only. */
+/** wrapper region — a compiled_in loop that generated NO CTE of its own (a 0-CTE
+ *  wrapper around a nested generating loop). Present, but never incremental-only,
+ *  and NEVER a "templated · 0 CTEs" fan-out chip. */
 export const StructuralWrapper = (): React.ReactElement => <ZonePresence treatment={STRUCTURAL} />;
 
-/** The full list — all three states together (the shelf's Jinja-zones section). */
-export const AllThreeStates = (): React.ReactElement => (
-  <ZonePresenceList treatments={[COMPILED_IN, STRUCTURAL, COMPILED_OUT]} />
+/** structural incremental_guard — an {% if is_incremental() %} region present this
+ *  build. Reads as a GUARD region, never a "{% for %} wrapper region". */
+export const StructuralIncrementalGuard = (): React.ReactElement => <ZonePresence treatment={STRUCTURAL_GUARD} />;
+
+/** The full list — every state together (the shelf's Jinja-zones section). */
+export const AllStates = (): React.ReactElement => (
+  <ZonePresenceList treatments={[COMPILED_IN, STRUCTURAL, STRUCTURAL_GUARD, COMPILED_OUT]} />
 );

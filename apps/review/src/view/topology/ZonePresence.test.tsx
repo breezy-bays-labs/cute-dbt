@@ -86,6 +86,40 @@ describe("ZonePresence — the 3-state honest treatment", () => {
     expect(html).toMatch(/wrapper|region/i);
   });
 
+  it("compiled_in WITHOUT generation (0-CTE wrapper) renders the wrapper chip + body — NEVER 'templated · 0 CTEs' (never-a-false-claim)", () => {
+    // order_status_pivot zone:1 — presence "compiled_in" carried verbatim, but the
+    // `for region` wrapper generated NO CTE of its own (node_map.raw["zone:1"] = []).
+    // The chip MUST agree with the body's else-branch (wrapper region), not claim a
+    // purple "templated · 0 CTEs" fan-out next to "emits no CTE of its own".
+    const html = renderOne(
+      treatment({
+        presence: "compiled_in",
+        generated: false,
+        genCount: 0,
+        genIds: [],
+        loop: "for region in regions",
+        template: null,
+        explainer: "A {% for %} wrapper region — it templates the loops inside it; it emits no CTE of its own.",
+      }),
+    );
+    expect(html).toContain('data-presence="compiled_in"');
+    expect(html).toContain('data-incremental-only="false"');
+    // the contradiction the slice must prevent: a 0-CTE compiled_in must NOT claim
+    // the purple "templated · 0 CTEs" fan-out chip.
+    expect(html).not.toMatch(/templated · 0 CTEs/);
+    expect(html).not.toMatch(/0 CTEs/);
+    // it renders the honest wrapper-region treatment instead.
+    expect(html).toMatch(/wrapper region/i);
+    // and never a fabricated incremental explainer either.
+    expect(html).not.toContain('data-testid="incremental-only-explainer"');
+  });
+
+  it("compiled_in WITH generation still names the real fan-out CTE count (regression guard for the chip fix)", () => {
+    const html = renderOne(treatment({ presence: "compiled_in", generated: true, genCount: 2 }));
+    expect(html).toMatch(/2 CTEs/);
+    expect(html).toContain('data-testid="fanout-ctes"');
+  });
+
   it("every state carries the zone id + loop header (selectable cross-ref to the ring)", () => {
     const html = renderOne(treatment({ zoneId: "z2", loop: "for status in statuses" }));
     expect(html).toContain('data-zone="z2"');
