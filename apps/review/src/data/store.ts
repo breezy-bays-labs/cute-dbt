@@ -4,11 +4,15 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import type { AppTheme } from "../domain/highlighter";
+import { createKeymapSlice, type KeymapSlice } from "./keymap-slice";
 
 export const PERSIST_KEY = "cute-dbt:review";
 export const PERSIST_VERSION = 1;
 
-export interface AppState {
+// The S0 selection slice + the S1 keymap slice. Later slices (nav/review/ui)
+// compose in the same way. The keymap slice owns only the sparse rebind override;
+// every binding/predicate lives in the pure domain registry.
+export interface AppState extends KeymapSlice {
   selectedModel: string | null;
   theme: AppTheme;
   setSelectedModel: (name: string) => void;
@@ -22,6 +26,10 @@ export const useAppStore = create<AppState>()(
       theme: "tokyo",
       setSelectedModel: (name) => set({ selectedModel: name }),
       setTheme: (theme) => set({ theme }),
+      // keymap slice — its `set` is the store setter, narrowed to the slice's shape.
+      ...createKeymapSlice((partial) =>
+        set(partial as Partial<AppState> | ((s: AppState) => Partial<AppState>)),
+      ),
     }),
     {
       name: PERSIST_KEY,
@@ -29,7 +37,8 @@ export const useAppStore = create<AppState>()(
       storage: createJSONStorage(() => localStorage),
       // fail-closed merge: defaults win for any key the persisted blob lacks.
       merge: (persisted, current) => ({ ...current, ...(persisted as Partial<AppState>) }),
-      partialize: (s) => ({ selectedModel: s.selectedModel, theme: s.theme }),
+      // persist the selection, theme, AND the keymap override (rebindings stick).
+      partialize: (s) => ({ selectedModel: s.selectedModel, theme: s.theme, keymapOverride: s.keymapOverride }),
     },
   ),
 );
