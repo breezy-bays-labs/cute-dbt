@@ -565,6 +565,11 @@ fn execute_report(args: &ReportArgs) -> Result<ReportOutcome, RunError> {
         &model_states,
         &removed_models,
         pr_comments.as_ref(),
+        // cute-dbt#491 — the additive `--context-out` artifact (the SSOT
+        // context payload as standalone, schema-versioned JSON). `None` ⇒
+        // no context file (the default path). Mirrors `--findings-out`:
+        // additive, the HTML report is byte-identical either way.
+        args.context_out.as_deref(),
     )
     .map_err(|err| RunError::output(&args.out, err))?;
     // cute-dbt#386 — the machine-readable findings envelope. Purely
@@ -2410,6 +2415,9 @@ fn render(
     model_states: &BTreeMap<NodeId, ModelState>,
     removed_models: &[String],
     pr_comments: Option<&CommentsView>,
+    // cute-dbt#491 — the `--context-out` artifact path, threaded straight
+    // through to the render adapter (which owns serialize + write).
+    context_out: Option<&Path>,
 ) -> Result<(), io::Error> {
     render_report_with_externals(
         out,
@@ -2439,6 +2447,7 @@ fn render(
         model_states,
         removed_models,
         pr_comments,
+        context_out,
     )
 }
 
@@ -2462,6 +2471,7 @@ mod tests {
             pr_number: None,
             pr_comments: None,
             findings_out: None,
+            context_out: None,
             fail_on_uncovered: false,
             annotations: false,
             generated_at: None,

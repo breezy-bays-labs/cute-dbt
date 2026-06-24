@@ -307,6 +307,24 @@ pub struct ReportArgs {
     #[arg(long, value_name = "PATH")]
     pub findings_out: Option<PathBuf>,
 
+    /// Emit the structured **context** payload as standalone JSON to this
+    /// path, alongside the HTML `--out` report in the same run (cute-dbt#491).
+    ///
+    /// Additive sidecar — NOT a format swap: the HTML report is written
+    /// exactly as before (byte-identical), and this writes the SAME payload
+    /// that report inlines (the `<script id="cute-dbt-data">` blob) as a
+    /// standalone, versioned JSON file. The artifact is the domain's
+    /// [`ContextEnvelope`](crate::domain::ContextEnvelope):
+    /// `{ "metadata": { "schema_version": <int> }, "data": { ... } }`, where
+    /// `data` is byte-identical to the inlined payload and
+    /// `metadata.schema_version` is the integer stability anchor downstream
+    /// consumers (the TS review app's drift-gate) pin to — so a *thin*
+    /// context (legitimately sparse) is distinguishable from a *downgraded*
+    /// one (an older/incompatible producer). The file's parent directory
+    /// must already exist (the same contract as `--out` / `--findings-out`).
+    #[arg(long, value_name = "PATH")]
+    pub context_out: Option<PathBuf>,
+
     /// Exit non-zero when the in-scope set carries any **Total-tier
     /// `Uncovered`** finding (cute-dbt#386) — the deterministic
     /// coverage-gap gate for CI.
@@ -490,44 +508,65 @@ fn parse_project_root(s: &str) -> Result<PathBuf, String> {
     Ok(p)
 }
 
-/// Post-parse validation clap's derive cannot express: reject a
-/// `report --findings-out` that resolves to the same path as `--out`
-/// (cute-dbt#386, `CodeRabbit` on PR #388).
+/// Post-parse validation clap's derive cannot express: reject any two of
+/// `report`'s three output flags — `--out`, `--findings-out`,
+/// `--context-out` — resolving to the same path (cute-dbt#386,
+/// `CodeRabbit` on PR #388; generalized to all three pairs at cute-dbt#491,
+/// gemini on PR #504).
 ///
-/// The findings sidecar is written *after* the HTML report, so
-/// `--out report.html --findings-out report.html` would silently clobber
-/// the just-rendered HTML with the envelope JSON on an otherwise
-/// successful run — destroying the primary artifact and breaking the
-/// additive-sidecar contract. This is a usage error, not a runtime
-/// `PreflightError` (the enum stays at four variants — the
-/// `--config` / baseline-missing precedent: a conflict between two flags
-/// is a clap-level [`ArgGroup`]-style usage error, exit 2). It is raised
-/// here rather than in the derive because clap cannot compare two
-/// `PathBuf` arguments for equality.
+/// The two sidecars are written on an otherwise-successful run, so any
+/// collision silently clobbers one artifact with another's bytes —
+/// `--out report.html --findings-out report.html` overwrites the HTML
+/// report with the envelope JSON; `--findings-out a.json --context-out
+/// a.json` overwrites the findings envelope with the context envelope.
+/// Both destroy a requested artifact and break the additive-sidecar
+/// contract. This is a usage error, not a runtime `PreflightError` (the
+/// enum stays at four variants — the `--config` / baseline-missing
+/// precedent: a conflict between two flags is a clap-level
+/// [`ArgGroup`]-style usage error, exit 2). It is raised here rather than
+/// in the derive because clap cannot compare two `PathBuf` arguments for
+/// equality.
 ///
 /// The comparison is **syntactic** (the as-typed [`PathBuf`]s), not a
 /// canonicalized filesystem resolve: it catches the literal footgun
-/// without an I/O round-trip (neither path is required to exist yet — the
-/// same write-time `--out` contract). Only the `report` verb carries the
-/// two flags; every other verb is a no-op here.
+/// without an I/O round-trip (no path is required to exist yet — the same
+/// write-time `--out` contract). Only the `report` verb carries the
+/// flags; every other verb is a no-op here.
 ///
 /// # Errors
 ///
 /// Returns a [`clap::error::ErrorKind::ArgumentConflict`] error (exit 2)
-/// when `report`'s `--findings-out` equals its `--out`.
+/// naming the two colliding flags when any two of `report`'s `--out`,
+/// `--findings-out`, `--context-out` resolve to the same path.
 pub fn validate_argument_conflicts(cli: &Cli) -> Result<(), clap::Error> {
     use clap::CommandFactory;
-    if let Command::Report(report) = &cli.command
-        && report.findings_out.as_ref() == Some(&report.out)
-    {
-        return Err(Cli::command().error(
-            clap::error::ErrorKind::ArgumentConflict,
-            format!(
-                "--findings-out must differ from --out (both resolve to {}); \
-                 the sidecar JSON would overwrite the HTML report",
-                report.out.display()
-            ),
-        ));
+    if let Command::Report(report) = &cli.command {
+        // The three output sinks, each tagged with its flag name. `--out`
+        // is always present; the two sidecars are opt-in (`Option`). Any
+        // two resolving to the same syntactic path is a clobber.
+        let mut sinks: Vec<(&str, &Path)> = vec![("--out", report.out.as_path())];
+        if let Some(p) = report.findings_out.as_deref() {
+            sinks.push(("--findings-out", p));
+        }
+        if let Some(p) = report.context_out.as_deref() {
+            sinks.push(("--context-out", p));
+        }
+        // Pairwise comparison over at most three sinks — the first
+        // collision found wins (deterministic: outer index ascending).
+        for (i, &(flag_a, path_a)) in sinks.iter().enumerate() {
+            for &(flag_b, path_b) in &sinks[i + 1..] {
+                if path_a == path_b {
+                    return Err(Cli::command().error(
+                        clap::error::ErrorKind::ArgumentConflict,
+                        format!(
+                            "{flag_a} and {flag_b} must differ (both resolve to {}); \
+                             one output would overwrite the other",
+                            path_a.display()
+                        ),
+                    ));
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -1782,6 +1821,85 @@ tilte = "typo'd"
     }
 
     #[test]
+    fn context_out_equal_to_out_is_an_argument_conflict() {
+        // cute-dbt#491 — the same footgun for the context sidecar: a
+        // `--context-out` resolving to `--out` would clobber the HTML report.
+        let cli = parse(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "report.html",
+            "--context-out",
+            "report.html",
+        ])
+        .expect("the args themselves parse — the collision is a post-parse check");
+        let err = validate_argument_conflicts(&cli)
+            .expect_err("--context-out == --out is a usage conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        assert!(err.use_stderr(), "the path collision is a usage error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--context-out") && msg.contains("--out"),
+            "the error names both flags: {msg}"
+        );
+    }
+
+    #[test]
+    fn context_out_equal_to_findings_out_is_an_argument_conflict() {
+        // cute-dbt#491 / gemini on PR #504 — the third pair: the two
+        // sidecars resolving to the same path silently clobber each other
+        // (the context envelope overwrites the findings envelope, both on
+        // an otherwise-successful run). `--out` is distinct here, so this
+        // collision is ONLY caught by the generalized pairwise check.
+        let cli = parse(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "report.html",
+            "--findings-out",
+            "sidecar.json",
+            "--context-out",
+            "sidecar.json",
+        ])
+        .expect("the args themselves parse — the collision is a post-parse check");
+        let err = validate_argument_conflicts(&cli)
+            .expect_err("--context-out == --findings-out is a usage conflict");
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
+        assert!(err.use_stderr(), "the path collision is a usage error");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--findings-out") && msg.contains("--context-out"),
+            "the error names both colliding sidecar flags: {msg}"
+        );
+    }
+
+    #[test]
+    fn distinct_context_out_and_out_pass_validation() {
+        let cli = parse(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "report.html",
+            "--context-out",
+            "context.json",
+        ])
+        .expect("distinct output paths parse");
+        validate_argument_conflicts(&cli).expect("distinct paths are not a conflict");
+    }
+
+    #[test]
     fn distinct_findings_out_and_out_pass_validation() {
         let cli = parse(&[
             "cute-dbt",
@@ -1797,6 +1915,28 @@ tilte = "typo'd"
         ])
         .expect("distinct output paths parse");
         validate_argument_conflicts(&cli).expect("distinct paths are not a conflict");
+    }
+
+    #[test]
+    fn all_three_output_paths_distinct_pass_validation() {
+        // cute-dbt#491 / gemini on PR #504 — all three sinks present and
+        // distinct: the generalized pairwise check must find no collision.
+        let cli = parse(&[
+            "cute-dbt",
+            "report",
+            "--manifest",
+            "m.json",
+            "--baseline-manifest",
+            "b.json",
+            "--out",
+            "report.html",
+            "--findings-out",
+            "findings.json",
+            "--context-out",
+            "context.json",
+        ])
+        .expect("distinct output paths parse");
+        validate_argument_conflicts(&cli).expect("three distinct paths are not a conflict");
     }
 
     #[test]

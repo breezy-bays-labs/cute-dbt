@@ -267,6 +267,8 @@ fn render_pr_diff_with_axes_to_file(
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
         None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -321,6 +323,8 @@ fn render_pr_diff_with_states_to_file(
         &model_states,
         removed_models,
         // cute-dbt#419 — no PR review-comments through this render call.
+        None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
         None,
     )
     .expect("render writes the report");
@@ -5520,6 +5524,8 @@ fn render_with_external_fixtures(
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
         None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -6016,6 +6022,8 @@ fn report_seed_import_node_shelf_shows_the_seed_data_table() {
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
         None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
+        None,
     )
     .expect("render writes the report");
     let url = format!(
@@ -6139,6 +6147,8 @@ fn report_non_seed_import_node_shelf_is_unchanged() {
         &std::collections::BTreeMap::new(),
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
+        None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
         None,
     )
     .expect("render writes the report");
@@ -8987,6 +8997,8 @@ fn suppressed_findings_render_as_a_collapsed_count_with_reasons() {
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
         None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
+        None,
     )
     .expect("render writes the report");
     let url = format!("file://{}", out.to_str().expect("UTF-8 path"));
@@ -9566,6 +9578,8 @@ fn suppressed_row_text_meets_aa_contrast_on_every_theme() {
         &std::collections::BTreeMap::new(),
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
+        None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
         None,
     )
     .expect("render writes the report");
@@ -13745,6 +13759,8 @@ fn render_with_project_facts(filename: &str, facts: &ProjectFacts) -> String {
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
         None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -13793,6 +13809,8 @@ fn render_governance_to_file(
         &std::collections::BTreeMap::new(),
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
+        None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
         None,
     )
     .expect("render writes the report");
@@ -14012,6 +14030,8 @@ fn render_macro_lens_to_file(filename: &str) -> String {
         &std::collections::BTreeMap::new(),
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
+        None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
         None,
     )
     .expect("render writes the report");
@@ -14316,6 +14336,8 @@ fn render_two_macro_lens_to_file(filename: &str) -> String {
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
         None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
+        None,
     )
     .expect("render writes the report");
     format!("file://{}", out.to_str().expect("UTF-8 path"))
@@ -14483,6 +14505,8 @@ fn render_capped_macro_lens_to_file(filename: &str, model_count: usize, body_cap
         &std::collections::BTreeMap::new(),
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
+        None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
         None,
     )
     .expect("render writes the report");
@@ -15883,6 +15907,8 @@ fn render_seed_report(filename: &str, seed_cards: &[SeedCard]) -> String {
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
         None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");
@@ -16247,6 +16273,8 @@ fn render_minidag_report(filename: &str) -> String {
         &std::collections::BTreeMap::new(),
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
+        None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
         None,
     )
     .expect("render writes the report");
@@ -16654,6 +16682,8 @@ fn render_lens_shell_to_file(filename: &str) -> String {
         &std::collections::BTreeMap::new(),
         &[],
         // cute-dbt#419 — no PR review-comments through this render call.
+        None,
+        // cute-dbt#491 — no --context-out artifact through this render call.
         None,
     )
     .expect("render writes the report");
@@ -17151,6 +17181,8 @@ fn render_folding_comments_to_file(filename: &str) -> String {
         &std::collections::BTreeMap::new(),
         &[],
         Some(&view),
+        // cute-dbt#491 — no --context-out artifact through this render call.
+        None,
     )
     .expect("render writes the report");
     let p = out.to_str().expect("report path is valid UTF-8");

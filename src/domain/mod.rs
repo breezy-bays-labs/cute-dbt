@@ -41,6 +41,7 @@ pub mod checks;
 pub mod column_context;
 pub mod column_lineage;
 pub mod config;
+pub mod context_envelope;
 pub mod cte;
 pub mod experimental;
 pub mod finding_anchor;
@@ -93,6 +94,7 @@ pub use config::{
     AnalysisConfig, DEFAULT_REPORT_TITLE, DEFAULT_SEED_ROW_CAP, PrConfig, PrRef, ReportConfig,
     SeedsConfig,
 };
+pub use context_envelope::{CONTEXT_SCHEMA_VERSION, ContextEnvelope, ContextMetadata};
 pub use cte::{
     ColumnEdge, ColumnEdgeConfidence, ColumnEdgeKind, ColumnProvenance, ColumnProvenanceEntry,
     ColumnRef, ColumnScope, ColumnSpan, CteEdge, CteGraph, CteNode, EdgeType, JoinKeyPair,
