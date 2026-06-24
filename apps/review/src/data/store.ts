@@ -116,6 +116,47 @@ export function hydrateMerge(persisted: unknown): Partial<AppState> {
 }
 
 /**
+ * Map an OLDER persisted blob into the CURRENT persisted shape (`PersistedShape`)
+ * before `hydrateMerge` runs. Zustand's `migrate` is called only when the stored
+ * `version` is below `PERSIST_VERSION`.
+ *
+ * The single real prior on-disk shape under the `cute-dbt:review` namespace is
+ * **v1** — the S0/S1 store persisted `{ selectedModel, theme, keymapOverride }`.
+ * In S2 the selection moved to `sel.models` and the theme to `settings.theme`,
+ * and `hydrateMerge` reads only the new keys; a v1 blob handed through unchanged
+ * would silently lose `selectedModel` and `theme`. This maps both into the v2
+ * shape (fail-closed per field — a wrong-typed legacy value degrades to its
+ * default via the same `hydrateMerge`/`mergeSettings` validation downstream).
+ * `keymapOverride` carries forward unchanged (it kept the same key + meaning).
+ *
+ * Any version ≥ 2 (or a non-object blob) passes straight through — `hydrateMerge`
+ * owns the same-shape merge-over-defaults.
+ */
+export function migratePersisted(persisted: unknown, version: number): Partial<AppState> {
+  if (version < 2 && persisted && typeof persisted === "object") {
+    const p = persisted as Record<string, unknown>;
+    const migrated: PersistedShape = {
+      // v1 had no per-entity nav state — start from the nav defaults, then carry
+      // the old single `selectedModel` into the models slot.
+      entity: NAV_DEFAULTS.entity,
+      viewByEntity: { ...NAV_DEFAULTS.viewMap },
+      sel: {
+        ...NAV_DEFAULTS.sel,
+        models: typeof p.selectedModel === "string" ? p.selectedModel : NAV_DEFAULTS.sel.models,
+      },
+      sidebar: UI_DEFAULTS.overlays.sidebar,
+      // theme moved from the top level into `settings.theme`; mergeSettings
+      // backfills every other settings field at its default.
+      settings: typeof p.theme === "string" ? mergeSettings({ theme: p.theme }) : { ...SETTINGS_DEFAULTS },
+      // keymapOverride kept the same key/meaning across v1→v2 (sanitized in hydrate).
+      keymapOverride: sanitizeKeymapOverride(p.keymapOverride),
+    };
+    return migrated as unknown as Partial<AppState>;
+  }
+  return persisted as Partial<AppState>;
+}
+
+/**
  * A FAIL-CLOSED storage wrapper. If `JSON.parse` (or any read) throws on a
  * corrupt blob, hydration silently falls back to defaults rather than crashing
  * the app — the load-half of the risk-#6 contract (the `merge`/`migrate` hooks
@@ -176,11 +217,19 @@ export const useAppStore = create<AppState>()(
       version: PERSIST_VERSION,
       storage: failClosedStorage(),
       partialize: (s) => partialize(s) as unknown as Partial<AppState>,
-      // migrate runs when the persisted version < PERSIST_VERSION. We always
-      // route through hydrateMerge (below, in `merge`) so a migrated blob picks
-      // up new defaults; `migrate` itself just passes the blob through (the
-      // merge-over-defaults is the real migration — additive by construction).
-      migrate: (persisted) => persisted as Partial<AppState>,
+      // migrate runs when the persisted version < PERSIST_VERSION. A v2+ blob is
+      // already in the current persisted shape (`entity`/`viewByEntity`/`sel`/
+      // `settings`/`sidebar`/`keymapOverride`) and routes through hydrateMerge
+      // (below, in `merge`) unchanged — the merge-over-defaults IS the additive
+      // migration for same-shape blobs.
+      //
+      // The ONE real prior on-disk shape under this namespace is v1 (the S0/S1
+      // store: `{ selectedModel, theme, keymapOverride }`). Those keys moved in
+      // S2 — selection → `sel.models`, theme → `settings.theme` — and hydrateMerge
+      // reads only the NEW keys, so a v1 blob passed straight through would
+      // SILENTLY drop the user's `selectedModel` and `theme`. Map the v1 shape
+      // into the current partialized shape here so an upgrading user keeps both.
+      migrate: (persisted, version) => migratePersisted(persisted, version),
       // fail-closed merge: defaults win for anything the persisted blob lacks,
       // each sub-blob merged over its slice defaults (new fields appear).
       merge: (persisted, current) => ({ ...current, ...hydrateMerge(persisted) }),

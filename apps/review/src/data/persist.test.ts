@@ -4,7 +4,7 @@
 // or a wholesale drop). These pin `hydrateMerge` + `mergeSettings` directly (the
 // pure halves the persist `merge`/`storage` hooks call).
 import { describe, it, expect } from "vitest";
-import { hydrateMerge, sanitizeKeymapOverride } from "./store";
+import { hydrateMerge, migratePersisted, sanitizeKeymapOverride } from "./store";
 import { mergeSettings, SETTINGS_DEFAULTS } from "./settings-slice";
 import { NAV_DEFAULTS } from "./nav-slice";
 import { UI_DEFAULTS } from "./ui-slice";
@@ -34,6 +34,33 @@ describe("mergeSettings — migrate-MERGE over defaults", () => {
     expect(mergeSettings(["dracula", "compact"])).toEqual(SETTINGS_DEFAULTS);
     // crucially: no numeric keys leaked onto the merged object.
     expect(Object.keys(mergeSettings(["x"]))).toEqual(Object.keys(SETTINGS_DEFAULTS));
+  });
+  it("PER-FIELD fail-closed: WRONG-TYPED values fall back to the typed default, valid fields still apply", () => {
+    // A hand-edited / stale blob where the right-named fields carry the WRONG
+    // runtime type (a stringified boolean, a stringified number). Each wrong-typed
+    // field must degrade to ITS typed default — never spread the string over the
+    // default — while correctly-typed fields in the same blob still win.
+    const malformed = {
+      project: "false", // string over a boolean default
+      contextLines: "3", // string over a number default
+      coverage: 1, // number over a boolean default
+      expandStep: true, // boolean over a number default
+      theme: "dracula", // valid string — still applies
+      density: "compact", // valid string — still applies
+    };
+    const merged = mergeSettings(malformed);
+    // wrong-typed fields keep the TYPED default (fail-closed at field grain):
+    expect(merged.project).toBe(SETTINGS_DEFAULTS.project); // boolean, not "false"
+    expect(typeof merged.project).toBe("boolean");
+    expect(merged.contextLines).toBe(SETTINGS_DEFAULTS.contextLines); // number, not "3"
+    expect(typeof merged.contextLines).toBe("number");
+    expect(merged.coverage).toBe(SETTINGS_DEFAULTS.coverage);
+    expect(typeof merged.coverage).toBe("boolean");
+    expect(merged.expandStep).toBe(SETTINGS_DEFAULTS.expandStep);
+    expect(typeof merged.expandStep).toBe("number");
+    // valid, correctly-typed fields still apply:
+    expect(merged.theme).toBe("dracula");
+    expect(merged.density).toBe("compact");
   });
 });
 
@@ -92,6 +119,40 @@ describe("hydrateMerge — the full persisted-blob → state merge", () => {
     expect(out.settings).toEqual(SETTINGS_DEFAULTS);
     expect(out.overlays?.sidebar).toBe(UI_DEFAULTS.overlays.sidebar); // non-bool → default
     expect(out.keymapOverride).toEqual({}); // reserved binding stripped
+  });
+});
+
+describe("migratePersisted — the v1 → v2 shape migration (the ONE real prior on-disk shape)", () => {
+  it("carries the v1 `selectedModel` into `sel.models` and `theme` into `settings.theme`", () => {
+    // the EXACT v1 (S0/S1) persisted shape under `cute-dbt:review`:
+    const v1 = { selectedModel: "orders", theme: "gruvbox", keymapOverride: { diff: "y" } };
+    const out = migratePersisted(v1, 1);
+    // run the migrated blob through hydrateMerge as the persist pipeline does:
+    const hydrated = hydrateMerge(out);
+    expect(hydrated.sel?.models).toBe("orders"); // selection survives the upgrade
+    expect(hydrated.settings?.theme).toBe("gruvbox"); // theme survives the upgrade
+    // the keymap override carries forward (same key + meaning across v1→v2):
+    expect(hydrated.keymapOverride).toEqual({ diff: "y" });
+    // un-remembered nav fields backfill their defaults (v1 had no per-entity nav):
+    expect(hydrated.entity).toBe(NAV_DEFAULTS.entity);
+    expect(hydrated.sel?.seeds).toBe(NAV_DEFAULTS.sel.seeds);
+    // and the new settings fields appear at their defaults (additive migrate):
+    expect(hydrated.settings?.diffEngine).toBe(SETTINGS_DEFAULTS.diffEngine);
+  });
+  it("a wrong-typed legacy `selectedModel`/`theme` degrades to defaults (fail-closed)", () => {
+    const v1bad = { selectedModel: 123, theme: 99 };
+    const out = migratePersisted(v1bad, 1);
+    const hydrated = hydrateMerge(out);
+    expect(hydrated.sel?.models).toBe(NAV_DEFAULTS.sel.models); // non-string → default
+    expect(hydrated.settings?.theme).toBe(SETTINGS_DEFAULTS.theme); // non-string → default
+  });
+  it("a v2+ blob passes straight through (hydrateMerge owns the same-shape merge)", () => {
+    const v2 = { entity: "pr", settings: { theme: "tokyo" } };
+    expect(migratePersisted(v2, 2)).toBe(v2); // unchanged identity — no remap
+  });
+  it("a non-object legacy blob passes through (hydrateMerge fail-closes it)", () => {
+    expect(migratePersisted(null, 1)).toBeNull();
+    expect(hydrateMerge(migratePersisted(null, 1))).toEqual({});
   });
 });
 

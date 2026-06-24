@@ -60,16 +60,35 @@ export const SETTINGS_DEFAULTS: Settings = {
 };
 
 /**
- * Merge a persisted settings blob over the defaults — the migrate-MERGE rule.
- * Every default field is present even if the persisted blob omits it (a new
- * field appears for existing users); persisted values win where present. Drops
- * non-object input fail-closed (returns the pristine defaults). `typeof [] ===
- * "object"` is true, so an explicit `Array.isArray` rejection keeps a persisted
- * array (numeric keys) from being spread into the settings object.
+ * Merge a persisted settings blob over the defaults — the migrate-MERGE rule,
+ * with PER-FIELD type validation (fail-closed at the field grain). Every default
+ * field is present even if the persisted blob omits it (a new field appears for
+ * existing users); a persisted value wins ONLY when its runtime type matches the
+ * default's type — otherwise that one field falls back to its default while the
+ * rest of the valid blob still applies. Without this, a hand-edited / stale
+ * localStorage blob like `{ project: "false", contextLines: "3" }` would spread
+ * strings over the typed defaults and the chrome would render the wrong UI
+ * (`App.tsx` reads these fields directly) instead of the fail-closed defaults
+ * this layer promises. Drops non-object / array input wholesale to the defaults
+ * (`typeof [] === "object"` is true, so the explicit `Array.isArray` rejection
+ * keeps a persisted array's numeric keys out of the settings object). The
+ * validation is data-driven off `SETTINGS_DEFAULTS` — `typeof default === typeof
+ * persisted` per key — so a new field added to `Settings` is covered for free.
  */
 export function mergeSettings(raw: unknown): Settings {
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) return { ...SETTINGS_DEFAULTS };
-  return { ...SETTINGS_DEFAULTS, ...(raw as Partial<Settings>) };
+  const r = raw as Record<string, unknown>;
+  const out = { ...SETTINGS_DEFAULTS };
+  for (const key of Object.keys(SETTINGS_DEFAULTS) as (keyof Settings)[]) {
+    const persisted = r[key];
+    // accept the persisted value only when its runtime type matches the
+    // default's type (string→string, boolean→boolean, number→number); anything
+    // else (wrong type, missing) keeps the typed default for this field.
+    if (key in r && typeof persisted === typeof SETTINGS_DEFAULTS[key]) {
+      (out[key] as Settings[keyof Settings]) = persisted as Settings[keyof Settings];
+    }
+  }
+  return out;
 }
 
 export interface SettingsSlice {

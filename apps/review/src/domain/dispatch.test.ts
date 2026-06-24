@@ -73,6 +73,30 @@ describe("routeKey — rung 5: app keys", () => {
   ] as const)("%s → %o", (key, action) => {
     expect(routeKey(ev({ key }), base).action).toEqual(action);
   });
+  it("a BARE app key claims + preventDefaults (the happy path)", () => {
+    const r = routeKey(ev({ key: "w" }), base);
+    expect(r.action).toEqual({ kind: "open-overlay", overlay: "review" });
+    expect(r.preventDefault).toBe(true);
+  });
+  it.each([
+    ["w", "metaKey"], // ⌘W (close tab)
+    ["w", "ctrlKey"], // ⌃W
+    ["p", "metaKey"], // ⌘P (print)
+    ["p", "ctrlKey"],
+    ["s", "metaKey"], // ⌘S (save)
+    ["s", "ctrlKey"],
+  ] as const)("a %s chord with %s is NOT claimed (browser shortcut left alone)", (key, mod) => {
+    // the canonicalizer normalizes only the bare key, so a ⌘/⌃+W press arrives
+    // here as key="w"; rungAppKeys must NOT claim it or call preventDefault.
+    const r = routeKey(ev({ key, [mod]: true }), base);
+    expect(r.action).toBeNull();
+    expect(r.preventDefault).toBe(false);
+  });
+  it("an alt-modified app key is also left alone (no hijack)", () => {
+    const r = routeKey(ev({ key: "s", altKey: true }), base);
+    expect(r.action).toBeNull();
+    expect(r.preventDefault).toBe(false);
+  });
 });
 
 describe("routeKey — rung 6: entity keys (number row)", () => {

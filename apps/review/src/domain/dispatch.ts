@@ -162,7 +162,15 @@ const APP_KEY: Record<string, DispatchAction> = {
   w: { kind: "open-overlay", overlay: "review" },
   p: { kind: "goto-pr" },
 };
-function rungAppKeys(k: string): DispatchResult | null {
+// The canonicalizer (S1) normalizes only the bare KEY, not the chord modifiers,
+// so a `⌘/⌃+W` / `⌘/⌃+P` / `⌘/⌃+S` press arrives here with `ev.key` === "w"/"p"/
+// "s". Without a modifier guard `rungAppKeys` would claim those chords and call
+// `preventDefault`, hijacking the browser's close-tab / print / save shortcuts.
+// Guard with `noMods` for parity with the entity/view rungs — an app key fires
+// only as a BARE press (`?`/`/`/`,` use Shift on most layouts, which `noMods`
+// deliberately allows; it gates meta/ctrl/alt only).
+function rungAppKeys(ev: KeyEventLike, k: string): DispatchResult | null {
+  if (!noMods(ev)) return null;
   const a = APP_KEY[k];
   return a ? claim(a) : null;
 }
@@ -223,7 +231,7 @@ export function routeKey(ev: KeyEventLike, st: DispatchInput): DispatchResult {
     // ── rung 4: modal-gate — an open overlay OWNS the keyboard. ──────────────
     (st.modal
       ? PASS
-      : (rungAppKeys(k) ??
+      : (rungAppKeys(ev, k) ??
         rungEntityKeys(ev, k) ??
         rungViewKeys(ev, st) ??
         rungContextKeys(k, st) ??
