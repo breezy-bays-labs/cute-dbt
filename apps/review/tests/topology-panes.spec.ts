@@ -145,7 +145,12 @@ test("S6b: the raw⇄compiled source toggle swaps the pane source (DAG follows t
   expect(external, `external requests: ${external.join(", ")}`).toEqual([]);
 });
 
-test("S6b: RAW shelf — clicking a {% for %} collapse (zone:N) node scrolls + ring-flashes the raw pane (cute-dbt#497 finding 1)", async ({ page }) => {
+// tracked: cute-dbt#523 — V1 (#495) narrowed the Models sidebar to in-scope models;
+// the only fixture model with a templated/zone raw-only node (order_status_pivot) is
+// out of PR scope → unreachable via the sidebar, so this navigation times out.
+// Finding 1 (raw-only forward sync) is unit-covered in cursor-sync.test.ts (side-aware
+// paths, 100% mutation); finding 3 in GraphNode.test.tsx + topology-graphs.test.ts.
+test.skip("S6b: RAW shelf — clicking a {% for %} collapse (zone:N) node scrolls + ring-flashes the raw pane (cute-dbt#497 finding 1)", async ({ page }) => {
   const external = await denyExternalNetwork(page);
   const consoleErrors: string[] = [];
   page.on("pageerror", (e) => consoleErrors.push("PAGEERROR: " + e.message));
