@@ -4,10 +4,12 @@
 // (which action a key produces) is covered by dispatch.test.ts; this file covers
 // the APPLY side (no DOM needed — applyDispatch reads getState() directly).
 import { describe, it, expect, beforeEach } from "vitest";
-import { applyDispatch, keyTarget } from "./use-keydown";
+import { applyDispatch, keyTarget, reviewScope, activeAnchors } from "./use-keydown";
 import { routeKey, type KeyEventLike, type DispatchInput } from "../domain/dispatch";
 import { useAppStore } from "./store";
-import { NAV_DEFAULTS, UI_DEFAULTS } from "./store";
+import { NAV_DEFAULTS, UI_DEFAULTS, REVIEW_DEFAULTS } from "./store";
+import { dataSlice } from "./data-slice";
+import { emptyReviewState } from "../domain/review/review-machine";
 
 beforeEach(() => {
   // reset the store to a known baseline (defaults) before each case.
@@ -20,7 +22,12 @@ beforeEach(() => {
     overlays: { ...UI_DEFAULTS.overlays },
     codeAnchor: null,
     anchorNonce: 0,
+    codeMode: UI_DEFAULTS.codeMode,
+    hunkCursor: { ...UI_DEFAULTS.hunkCursor },
+    // a fresh empty review state per case (so reviewed/resolved don't bleed across).
+    review: emptyReviewState(),
   });
+  void REVIEW_DEFAULTS;
 });
 
 describe("applyDispatch — overlay actions", () => {
@@ -139,16 +146,164 @@ describe("keyTarget — pierces the shadow DOM (discovery risk #5)", () => {
   });
 });
 
-describe("applyDispatch — claimed-but-unwired intents are inert (no crash, no mutation)", () => {
+describe("applyDispatch — still-unwired intents are inert (no crash, no mutation)", () => {
   it.each([
-    { kind: "cycle-instance", dir: 1 },
-    { kind: "set-code-mode", mode: "diff" },
     { kind: "set-data-mode", mode: "file" },
-    { kind: "mark-reviewed-advance" },
     { kind: "context", action: "next-hunk" },
   ] as const)("%o does not throw and leaves nav untouched", (action) => {
     const before = JSON.stringify(useAppStore.getState().sel);
     expect(() => applyDispatch(action)).not.toThrow();
     expect(JSON.stringify(useAppStore.getState().sel)).toBe(before);
+  });
+});
+
+// ── V1 flow handlers (live against the REAL dataset + review slice) ───────────
+// The store is reset to Models + the dataset's default model before each case.
+// reviewScope() reads the live dataset; these cases assert the real store effect.
+describe("applyDispatch — V1 review-flow handlers", () => {
+  function setupModels(): { scope: string[]; first: string } {
+    const st = useAppStore.getState();
+    st.setEntity("models");
+    const scope = reviewScope(st);
+    const first = scope[0]!;
+    st.setSel(first, "models");
+    return { scope, first };
+  }
+
+  it("mark-reviewed-advance marks the current model reviewed AND advances the selection", () => {
+    const { scope, first } = setupModels();
+    expect(scope.length).toBeGreaterThan(1); // the dogfood fixture has many models
+    applyDispatch({ kind: "mark-reviewed-advance" });
+    const st = useAppStore.getState();
+    expect(st.review.reviewed[first]).toBe(true); // marked
+    expect(st.sel.models).not.toBe(first); // advanced off the just-reviewed model
+    expect(scope).toContain(st.sel.models); // …to an in-scope model
+    expect(st.review.reviewed[st.sel.models!]).toBeUndefined(); // …that's unreviewed
+    expect(st.viewMap.models).toBe("code"); // landed on the reviewable code surface
+  });
+
+  it("next-unreviewed / prev-unreviewed jump to an unreviewed model (skipping reviewed)", () => {
+    const { scope, first } = setupModels();
+    applyDispatch({ kind: "next-unreviewed" });
+    const afterNext = useAppStore.getState().sel.models;
+    expect(afterNext).not.toBe(first);
+    expect(scope).toContain(afterNext);
+    applyDispatch({ kind: "prev-unreviewed" });
+    expect(useAppStore.getState().sel.models).toBe(first); // walked back
+  });
+
+  it("set-code-mode promotes the mode to the store + resets the hunk cursor", () => {
+    setupModels();
+    useAppStore.getState().stepHunkCursor([{ no: 3, side: "additions" }], 1); // advance cursor
+    applyDispatch({ kind: "set-code-mode", mode: "file" });
+    const st = useAppStore.getState();
+    expect(st.codeMode).toBe("file");
+    expect(st.hunkCursor).toEqual({ index: -1, nonce: 0 }); // reset on mode switch
+  });
+
+  it("step-hunk steps the running cursor over the active model's anchors", () => {
+    setupModels();
+    const anchors = activeAnchors(useAppStore.getState());
+    applyDispatch({ kind: "step-hunk", dir: 1 });
+    const st = useAppStore.getState();
+    if (anchors.length) {
+      expect(st.hunkCursor.index).toBe(0); // first forward step → index 0
+      expect(st.hunkCursor.nonce).toBe(1);
+    } else {
+      expect(st.hunkCursor.index).toBe(-1); // no anchors → honest no-op
+    }
+  });
+
+  it("resolve-from-keyboard toggles a focused thread's resolved state when one exists", () => {
+    const st0 = useAppStore.getState();
+    st0.setEntity("models");
+    // find a model that carries at least one live comment in the dataset.
+    const scope = reviewScope(st0);
+    const ds = dataSlice(st0.activeSource);
+    const withThread = scope.find((m) => (ds.D[m]?.comments.length ?? 0) > 0);
+    if (!withThread) return; // dataset has no live thread → nothing to assert (honest skip)
+    st0.setSel(withThread, "models");
+    const line = ds.D[withThread]!.comments[0]!.line!;
+    applyDispatch({ kind: "resolve-from-keyboard" });
+    expect(useAppStore.getState().review.resolved[`${withThread}@${line}`]).toBe(true);
+    applyDispatch({ kind: "resolve-from-keyboard" }); // toggle back
+    expect(useAppStore.getState().review.resolved[`${withThread}@${line}`]).toBeUndefined();
+  });
+
+  it("resolve-from-keyboard and step-hunk no-op outside Models (the entity guard, cute-dbt#522)", () => {
+    setupModels();
+    // leave Models for a non-reviewable entity; a stale sel.models remains, but the
+    // review verbs must NOT act on it (a direct dispatch must match applyReviewFlow's
+    // own Models-only contract — not resolve a thread / move the hunk cursor off-Models).
+    useAppStore.getState().setEntity("pr");
+    const hunk0 = useAppStore.getState().hunkCursor;
+    const resolved0 = useAppStore.getState().review.resolved;
+    applyDispatch({ kind: "step-hunk", dir: 1 });
+    applyDispatch({ kind: "resolve-from-keyboard" });
+    const st = useAppStore.getState();
+    expect(st.hunkCursor).toEqual(hunk0); // step-hunk guarded outside Models
+    expect(st.review.resolved).toEqual(resolved0); // resolve-from-keyboard guarded
+  });
+
+  it("cycle-instance walks the in-scope model list (wraps)", () => {
+    const { scope, first } = setupModels();
+    applyDispatch({ kind: "cycle-instance", dir: 1 });
+    expect(useAppStore.getState().sel.models).toBe(scope[1]);
+    // wrap back to the first from the last.
+    useAppStore.getState().setSel(scope[scope.length - 1]!, "models");
+    applyDispatch({ kind: "cycle-instance", dir: 1 });
+    expect(useAppStore.getState().sel.models).toBe(first);
+  });
+
+  // ── cute-dbt#495 finding #1: the review scope is MODELS only ────────────────
+  // prSelectable carries a seed (`raw_payments`) + a macro (`cents_to_dollars`)
+  // in the dogfood fixture; the review LOOP must NOT walk them (they have no
+  // record in D, so advancing onto one shows the WRONG model's diff while marking
+  // the seed/macro reviewed). The E2E only presses `x` twice, never reaching the
+  // seed/macro positions — these cases drive the loop to COMPLETION.
+  it("the review scope excludes the seed + macro prSelectable carries", () => {
+    const st = useAppStore.getState();
+    st.setEntity("models");
+    const scope = reviewScope(st);
+    const ds = dataSlice(st.activeSource);
+    // the contaminated source still carries the non-models …
+    expect(ds.prSelectable).toContain("raw_payments");
+    expect(ds.prSelectable).toContain("cents_to_dollars");
+    // … but the LOOP scope drops them and contains ONLY real models.
+    expect(scope).not.toContain("raw_payments");
+    expect(scope).not.toContain("cents_to_dollars");
+    scope.forEach((id) => expect(ds.D[id], `${id} must be a model with a record`).toBeDefined());
+  });
+
+  it("driving `x` to loop-completion NEVER selects or marks a non-model (seed/macro)", () => {
+    const st0 = useAppStore.getState();
+    st0.setEntity("models");
+    const scope = reviewScope(st0);
+    st0.setSel(scope[0]!, "models");
+    // mark every model reviewed by repeatedly pressing `x` (one more than scope
+    // length to prove it terminates without ever touching a non-model).
+    const visited: string[] = [];
+    for (let i = 0; i < scope.length + 2; i++) {
+      const cur = useAppStore.getState().sel.models;
+      if (cur) visited.push(cur);
+      applyDispatch({ kind: "mark-reviewed-advance" });
+    }
+    const st = useAppStore.getState();
+    const ds = dataSlice(st.activeSource);
+    // every id the loop ever SELECTED is a real model (never a seed/macro).
+    visited.forEach((id) => {
+      expect(ds.D[id], `selected ${id} must be a model`).toBeDefined();
+      expect(id).not.toBe("raw_payments");
+      expect(id).not.toBe("cents_to_dollars");
+    });
+    // every id the loop ever MARKED reviewed is a real model (the seed/macro are
+    // NEVER in the reviewed set — the never-a-false-claim contract).
+    Object.keys(st.review.reviewed).forEach((id) => {
+      expect(ds.D[id], `reviewed ${id} must be a model`).toBeDefined();
+    });
+    expect(st.review.reviewed["raw_payments"]).toBeUndefined();
+    expect(st.review.reviewed["cents_to_dollars"]).toBeUndefined();
+    // the loop completes: every in-scope MODEL is reviewed, nothing else.
+    expect(Object.keys(st.review.reviewed).sort()).toEqual([...scope].sort());
   });
 });

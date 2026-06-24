@@ -161,6 +161,13 @@ export function PierreDiff({ file, shiki, reviewers = [], openAnchor, navRef }: 
     return () => {
       done = true;
       if (pending) clearTimeout(pending);
+      // also clear the ring-flash REMOVAL timer (a DIFFERENT timer than `pending`)
+      // so it can't fire on a detached/re-anchored row after unmount.
+      if (flashRef.current.t) clearTimeout(flashRef.current.t);
+      // and strip a lingering ring from the previously-flashed row so it can't be
+      // left highlighted when no subsequent anchor resolves.
+      if (flashRef.current.el) flashRef.current.el.classList.remove("kbd-ring");
+      flashRef.current = { el: null, t: null };
     };
   }, [openAnchor?.nonce, openAnchor?.line]);
 

@@ -32,6 +32,45 @@ describe("buildDataset — WeakMap memoization + per-source reshape", () => {
   });
 });
 
+describe("prSelectableModels — the MODEL-ONLY review scope (cute-dbt#495 fix)", () => {
+  // prSelectable carries every non-connector/non-halo PR-scope node — INCLUDING
+  // seeds + macros (the dogfood fixture has `raw_payments` seed + `cents_to_dollars`
+  // macro). The Models review LOOP must walk MODELS only: a seed/macro id has no
+  // record in D, so advancing onto it shows the WRONG model's diff while marking
+  // the seed/macro reviewed (the never-a-false-claim violation). prSelectableModels
+  // is prSelectable filtered to ids that ARE models (own keys of D).
+  it("excludes the seed + macro that prSelectable carries (real fixture)", () => {
+    const ds = buildDataset(ctx440());
+    // the contaminated source still carries the non-models (we don't mutate it).
+    expect(ds.prSelectable).toContain("raw_payments"); // a seed
+    expect(ds.prSelectable).toContain("cents_to_dollars"); // a macro
+    // the MODEL-ONLY scope drops them.
+    expect(ds.prSelectableModels).not.toContain("raw_payments");
+    expect(ds.prSelectableModels).not.toContain("cents_to_dollars");
+    // exactly the prSelectable ids that have a model record survive.
+    expect(ds.prSelectableModels).toEqual(ds.prSelectable.filter((id) => !!ds.D[id]));
+    expect(ds.prSelectableModels.length).toBe(ds.prSelectable.length - 2);
+  });
+  it("every prSelectableModels id has a model record in D (the loop never lands recordless)", () => {
+    const ds = buildDataset(ctx440());
+    expect(ds.prSelectableModels.length).toBeGreaterThan(0);
+    ds.prSelectableModels.forEach((id) => {
+      expect(ds.D[id], `${id} must have a model record`).toBeDefined();
+      expect(ds.MODELS).toContain(id); // …and be a real model name
+    });
+  });
+  it("falls back to MODELS when the PR scope is empty (parity with prSelectable)", () => {
+    const data = {
+      baseline: "main",
+      models: [{ name: "m1", path: "models/marts/m1.sql", state: "modified", raw_sql: "select 1" }],
+      seed_cards: [], pr_comments: { by_model: [], unanchored: [] },
+    } as unknown as ContextData;
+    const ds = buildDataset(data);
+    expect(ds.prSelectable).toEqual(["m1"]); // empty PR scope → MODELS fallback
+    expect(ds.prSelectableModels).toEqual(["m1"]);
+  });
+});
+
 describe("raw NEVER masquerades as compiled (the honesty invariant)", () => {
   it("a model with no code_map has NULL compiledSql/nodeSpans (never raw_sql)", () => {
     const ds = buildDataset(loadFixture("context.sample") as unknown as ContextData);

@@ -106,6 +106,18 @@ export function isAvailable(entity: Entity, view: View): boolean {
   return (AVAIL[entity] as readonly View[]).includes(view);
 }
 
+/**
+ * Is `(entity, view)` a ROUTABLE pair — either a positional tab OR an off-matrix
+ * surface `routeTarget` resolves to a real component (e.g. Models `code`, which
+ * is deliberately off-matrix but reachable by deep-link / the review-flow keys)?
+ * This is the predicate `deriveView` uses so a remembered off-matrix-but-routable
+ * view (Models `code`, the V1 keyboard-review surface) survives, while a genuinely
+ * unavailable view (Models `files`) still falls back. `not-available` ⇒ false.
+ */
+export function isRoutable(entity: Entity, view: View): boolean {
+  return routeTarget(entity, view).kind !== "not-available";
+}
+
 /** Position of a view in the entity's matrix tuple, or -1 (e.g. Models `code`). */
 export function viewPos(entity: Entity, view: View): number {
   return (AVAIL[entity] as readonly View[]).indexOf(view);

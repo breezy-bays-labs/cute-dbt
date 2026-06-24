@@ -162,3 +162,40 @@ describe("sanitizeKeymapOverride — the deny-list hydration guard (unchanged fr
     expect(sanitizeKeymapOverride(null)).toEqual({});
   });
 });
+
+describe("hydrateMerge — the review-flow state (V1) durably round-trips", () => {
+  it("a persisted review blob survives hydration (reviewed + checkpoint + pending)", () => {
+    const review = {
+      reviewed: { customers: true },
+      pending: { orders: [{ path: "models/orders.sql", line: 2, side: "new", body: "nit" }] },
+      published: {},
+      resolved: { "customers@4": true },
+      reviews: [{ state: "COMMENTED", body: "", at: "2026-06-24T00:00:00Z" }],
+      checkpoint: "2026-06-24T00:00:00Z",
+    };
+    const out = hydrateMerge({ entity: "models", review });
+    expect(out.review?.reviewed.customers).toBe(true);
+    expect(out.review?.checkpoint).toBe("2026-06-24T00:00:00Z");
+    expect(out.review?.pending.orders).toHaveLength(1);
+    expect(out.review?.resolved["customers@4"]).toBe(true);
+  });
+
+  it("a blob with NO review field hydrates to a clean empty review state (additive)", () => {
+    const out = hydrateMerge({ entity: "models" });
+    expect(out.review?.reviewed).toEqual({});
+    expect(out.review?.checkpoint).toBeNull();
+  });
+
+  it("a corrupt review sub-blob degrades to empty IN PLACE (never crashes hydration)", () => {
+    const out = hydrateMerge({ entity: "models", review: "not-an-object" });
+    expect(out.review?.reviewed).toEqual({});
+    expect(out.review?.reviews).toEqual([]);
+  });
+
+  it("a v1 blob migrated to v2 carries an empty review state (predates the flow)", () => {
+    const v1 = { selectedModel: "orders", theme: "gruvbox" };
+    const hydrated = hydrateMerge(migratePersisted(v1, 1));
+    expect(hydrated.review?.reviewed).toEqual({});
+    expect(hydrated.review?.checkpoint).toBeNull();
+  });
+});

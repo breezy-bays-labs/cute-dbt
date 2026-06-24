@@ -18,10 +18,12 @@ import { shikiName, ensureHighlighter, type AppTheme } from "../domain/highlight
 import type { ContextData } from "../domain/context-data";
 import { ENTITY_NOUN } from "../domain/matrix";
 import type { Entity } from "../domain/keymap";
+import { progressOf, type Verdict } from "../domain/review/review-machine";
 import { Header } from "../view/Header";
 import { SubHeader } from "../view/SubHeader";
 import { ViewRouter } from "../view/ViewRouter";
 import { Footer } from "../view/Footer";
+import { WriteReview } from "../view/review/WriteReview";
 import type { KbContext } from "../domain/keymap";
 import type { View } from "../domain/matrix";
 
@@ -56,6 +58,17 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   const historyBack = useAppStore((s) => s.historyBack);
   const historyForward = useAppStore((s) => s.historyForward);
   const pushHistory = useAppStore((s) => s.pushHistory);
+  // ── V1 review-flow store subscriptions ────────────────────────────────────
+  const review = useAppStore((s) => s.review);
+  const codeMode = useAppStore((s) => s.codeMode);
+  const setCodeMode = useAppStore((s) => s.setCodeMode);
+  const addReviewDraft = useAppStore((s) => s.addReviewDraft);
+  const markReviewedAdvance = useAppStore((s) => s.markReviewedAdvance);
+  const publishReviewAction = useAppStore((s) => s.publishReview);
+  const buildPayload = useAppStore((s) => s.buildPayload);
+  const setSel2 = useAppStore((s) => s.setSel);
+  const setView2 = useAppStore((s) => s.setView);
+  const closeOverlay = useAppStore((s) => s.closeOverlay);
 
   const view = deriveView(viewMap, entity);
 
@@ -63,7 +76,6 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
   useKeydown();
 
   // ── per-surface ui local state (lands in slices in later slices) ──────────
-  const [codeMode, setCodeMode] = useState<"diff" | "file">("diff");
   const [dataMode, setDataMode] = useState<"diff" | "file">("diff");
   // the PR-scope change-axis (single-select; lands in a slice in a later slice).
   const [scopeAxis, setScopeAxis] = useState<ScopeAxis>("all");
@@ -90,20 +102,50 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
     pushHistory();
   }, [entity, view, JSON.stringify(sel)]);
 
+  // ── Esc closes the write-review overlay (the FIXED_KEYS `esc → close any
+  //    overlay` contract). The single dispatcher's modal gate suppresses every
+  //    OTHER key while the overlay owns the keyboard, but Esc must still dismiss
+  //    it — a capture-phase Esc handler that runs only while the overlay is open.
+  useEffect(() => {
+    if (!overlays.review) return;
+    const onEsc = (e: KeyboardEvent): void => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeOverlay("review");
+      }
+    };
+    window.addEventListener("keydown", onEsc, { capture: true });
+    return () => window.removeEventListener("keydown", onEsc, { capture: true });
+  }, [overlays.review, closeOverlay]);
+
+  // ── the in-scope MODEL set — the SINGLE source the sidebar, the SubHeader
+  //    instance list, activeName, the chip total, AND the keyboard loop share
+  //    (cute-dbt#495). prSelectableModels has dropped the seed/macro ids
+  //    prSelectable carries; the review loop walks models only, so the sidebar +
+  //    the loop + the chip can never disagree about which set is reviewable. ────
+  const reviewScopeModels = dataset.prSelectableModels;
+  const scopeModels = useMemo(
+    () => reviewScopeModels.map((n) => context.models.find((m) => m.name === n)).filter((m): m is NonNullable<typeof m> => !!m),
+    [reviewScopeModels, context],
+  );
+
   // ── resolve the active model + context (Models surfaces) ──────────────────
+  // activeName is valid only when sel.models is IN SCOPE (a reviewable model);
+  // a stale/out-of-scope sel falls back to the first in-scope model — never a
+  // non-model (the seed/macro sel that drove the wrong-diff bug).
   const activeName =
-    (entity === "models" && sel.models && context.models.some((m) => m.name === sel.models)
+    (entity === "models" && sel.models && reviewScopeModels.includes(sel.models)
       ? sel.models
       : null) ??
+    scopeModels[0]?.name ??
     context.models[0]?.name ??
     null;
   const model = context.models.find((m) => m.name === activeName) ?? context.models[0];
   const ctx = contexts.find((c) => c.name === activeName) ?? contexts[0];
   const shiki = shikiName(settings.theme as AppTheme);
 
-  // ── instance list per entity (S2: models from the fixture; others stubbed) ─
-  const modelNames = useMemo(() => context.models.map((m) => m.name), [context]);
-  const instances: readonly string[] = entity === "models" ? modelNames : [];
+  // ── instance list per entity (S2: the in-scope models; others stubbed) ─────
+  const instances: readonly string[] = entity === "models" ? reviewScopeModels : [];
 
   // ── PR reviewers (the comment composer's @-mention picker source) ──────────
   // Login STRINGS only (author + reviewer logins, deduped) — the picker calls
@@ -118,13 +160,69 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
       .join("\n\n");
   }, [model]);
 
-  // ── footer context (registry-fed; the flow chips degrade honestly) ────────
+  // ── V1 review-flow derivations (the REAL header chip + per-model state) ────
+  // the open-thread count: live (non-outdated, line-anchored) threads across the
+  // in-scope models, MINUS the ones the reviewer resolved this session. REAL —
+  // computed from the dataset, never fabricated.
+  const openThreads = useMemo(() => {
+    let n = 0;
+    for (const m of reviewScopeModels) {
+      const rec = dataset.D[m];
+      if (!rec) continue;
+      for (const c of rec.comments) {
+        if (c.line == null) continue;
+        const resolvedHere = review.resolved[`${m}@${c.line}`] === true;
+        if (!c.threadResolved && !resolvedHere) n++;
+      }
+    }
+    return n;
+  }, [dataset, reviewScopeModels, review.resolved]);
+  const progress = useMemo(
+    () => progressOf(review, reviewScopeModels, openThreads),
+    [review, reviewScopeModels, openThreads],
+  );
+  // the active model's REAL reviewed state + pending-draft count.
+  const activeReviewed = activeName != null && review.reviewed[activeName] === true;
+  const activeDraftCount = activeName != null ? (review.pending[activeName]?.length ?? 0) : 0;
+  const hasUnreviewed = progress.total > 0 && progress.reviewed < progress.total;
+
+  // ── footer context (registry-fed; the flow chips read the REAL flow signals) ─
   const footerCtx: KbContext = {
     entity,
     view,
     viewCount: undefined,
     noun: ENTITY_NOUN[entity],
+    codeMode,
+    // the flow signals — fed REAL now (V1): the flow is mounted on Models, there
+    // are unreviewed models, and a thread is focusable. The footer chips light up
+    // honestly instead of degrading to inactive.
+    inReview: entity === "models",
+    hasUnreviewed,
+    hasOpenThread: openThreads > 0,
   };
+
+  // ── the review-flow callbacks the ViewRouter + WriteReview consume ─────────
+  const onMarkReviewed = (): void => {
+    if (activeName == null) return;
+    const next = markReviewedAdvance(reviewScopeModels, activeName);
+    if (next != null) {
+      setSel2(next, "models");
+      setView2("code");
+      setCodeMode("diff");
+    }
+  };
+  const onPublishReview = (verdict: Verdict, body: string): void => {
+    publishReviewAction(verdict, body);
+    closeOverlay("review");
+  };
+  // the (owner/repo, pr#) the portable payload targets — parsed from the PR url
+  // in the context (honest "owner/repo" placeholder when the context lacks one).
+  const repoSlug = useMemo(() => {
+    const url = String(dataset.SCOPE.prUrl || "");
+    const m = url.match(/github\.com\/([^/]+\/[^/]+)\/pull\/\d+/);
+    return m ? m[1]! : "owner/repo";
+  }, [dataset]);
+  const prNumber = useMemo(() => Number(dataset.SCOPE.prNumber) || 0, [dataset]);
 
   // Preload the active shiki theme before render; loud-fail on an unregistered one.
   useEffect(() => {
@@ -163,7 +261,7 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
         sidebarOpen={overlays.sidebar}
         onSidebar={() => toggleOverlay("sidebar")}
         onSettings={() => toggleOverlay("settings")}
-        progressLabel={`✓ 0/${modelNames.length}`}
+        progressLabel={`✓ ${progress.reviewed}/${progress.total}${openThreads > 0 ? ` · ${openThreads} open` : ""}`}
         keymapOverride={keymapOverride}
         showElse={settings.project}
       />
@@ -200,9 +298,9 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
             data-testid="model-list"
             className="h-full w-64 shrink-0 overflow-auto border-r border-zinc-800 p-3"
           >
-            <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">Models ({modelNames.length})</div>
+            <div className="mb-2 text-xs uppercase tracking-wide text-zinc-500">Models ({scopeModels.length})</div>
             <ul>
-              {context.models.map((m) => (
+              {scopeModels.map((m) => (
                 <li key={m.name}>
                   <button
                     data-testid="model-list-item"
@@ -249,9 +347,25 @@ export function App({ initialTheme = "tokyo" }: { initialTheme?: AppTheme }): Re
               setEntity(entity);
               setSel(id, entity);
             }}
+            // ── V1 review-flow props (the Models reviewable surface) ─────────
+            modelReviewed={activeReviewed}
+            modelDraftCount={activeDraftCount}
+            onDraft={(d) => {
+              if (activeName != null) addReviewDraft(activeName, d);
+            }}
+            onMarkReviewed={onMarkReviewed}
           />
         </main>
       </div>
+
+      {overlays.review && (
+        <WriteReview
+          draftCount={review.pending ? Object.values(review.pending).reduce((n, a) => n + (a?.length ?? 0), 0) : 0}
+          onBuild={(verdict, body) => buildPayload({ verdict, body, repo: repoSlug, pr: prNumber })}
+          onPublish={onPublishReview}
+          onClose={() => closeOverlay("review")}
+        />
+      )}
 
       <Footer ctx={footerCtx} keymapOverride={keymapOverride} />
     </div>

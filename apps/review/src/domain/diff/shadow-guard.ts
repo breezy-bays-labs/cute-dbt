@@ -28,6 +28,9 @@ export function isInsideShadowOrEditable(
   if (!path || !path.length) return false;
   const hosts = new Set(shadowHosts.map((h) => h.toUpperCase()));
   for (const raw of path) {
+    // composedPath() can carry non-element entries (document / window) and a
+    // defensive caller may pass a null/primitive — skip those, never deref them.
+    if (!raw || typeof raw !== "object") continue;
     const node = raw as PathNode;
     const tag = (node.tagName ?? node.nodeName ?? "").toUpperCase();
     if (!tag) continue;

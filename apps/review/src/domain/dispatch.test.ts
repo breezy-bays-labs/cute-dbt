@@ -164,19 +164,62 @@ describe("routeKey — rung 8: context keys", () => {
     expect(routeKey(ev({ key: "n" }), base).action).toEqual({ kind: "cycle-instance", dir: 1 });
     expect(routeKey(ev({ key: "b" }), base).action).toEqual({ kind: "cycle-instance", dir: -1 });
   });
-  it("N / B (shift layer) cycle the OTHER direction's unreviewed jump (claimed)", () => {
-    // canonical token "N" is distinct from "n"; both route to cycle here (S2 spine).
-    expect(routeKey(ev({ key: "N", rawKey: "N", shiftKey: true }), base).action).toEqual({
-      kind: "cycle-instance",
-      dir: -1,
-    });
+  it("N / B (shift layer) are the next/prev-UNREVIEWED flow jumps (V1, not on PR)", () => {
+    // V1 (council MUST-FIX D): canonical "N"/"B" are the review-flow jumps — the
+    // first-class next/prev-unreviewed verbs the keymap registry binds (def N/B).
+    // (S2's spine placeholder routed them to cycle-instance; V1 wires the flow.)
+    expect(routeKey(ev({ key: "N", rawKey: "N", shiftKey: true }), base).action).toEqual({ kind: "next-unreviewed" });
+    expect(routeKey(ev({ key: "B", rawKey: "B", shiftKey: true }), base).action).toEqual({ kind: "prev-unreviewed" });
   });
-  it("n / b are inert on PR", () => {
+  it("N / B are inert on PR (review-flow jumps live on a reviewable entity)", () => {
+    expect(routeKey(ev({ key: "N", rawKey: "N", shiftKey: true }), { ...base, entity: "pr", view: "overview" }).action).toBeNull();
+    expect(routeKey(ev({ key: "B", rawKey: "B", shiftKey: true }), { ...base, entity: "pr", view: "overview" }).action).toBeNull();
+  });
+  it.each(["macros", "seeds", "else"] as const)(
+    "the review-flow verbs N / B / x do NOT claim on the non-reviewable entity %s (no false preventDefault on a dead key)",
+    (entity) => {
+      const ctx = { ...base, entity, view: "topology" as const };
+      // applyReviewFlow early-returns these on a non-models entity (V1's only
+      // reviewable entity), so claiming + preventDefault would be a dead key.
+      for (const key of ["N", "B"]) {
+        const r = routeKey(ev({ key, rawKey: key, shiftKey: true }), ctx);
+        expect(r.action, `${key} on ${entity}`).toBeNull();
+        expect(r.preventDefault, `${key} on ${entity} preventDefault`).toBe(false);
+      }
+      const rx = routeKey(ev({ key: "x" }), ctx);
+      expect(rx.action, `x on ${entity}`).toBeNull();
+      expect(rx.preventDefault, `x on ${entity} preventDefault`).toBe(false);
+    },
+  );
+  it("the review-flow verbs N / B / x stay live on Models (the reviewable entity)", () => {
+    expect(routeKey(ev({ key: "N", rawKey: "N", shiftKey: true }), base).action).toEqual({ kind: "next-unreviewed" });
+    expect(routeKey(ev({ key: "B", rawKey: "B", shiftKey: true }), base).action).toEqual({ kind: "prev-unreviewed" });
+    expect(routeKey(ev({ key: "x" }), base).action).toEqual({ kind: "mark-reviewed-advance" });
+  });
+  it("n / b cycle the instance and are inert on PR", () => {
+    expect(routeKey(ev({ key: "n" }), base).action).toEqual({ kind: "cycle-instance", dir: 1 });
     expect(routeKey(ev({ key: "n" }), { ...base, entity: "pr", view: "overview" }).action).toBeNull();
   });
   it("x marks-reviewed-advance (not on PR)", () => {
     expect(routeKey(ev({ key: "x" }), base).action).toEqual({ kind: "mark-reviewed-advance" });
     expect(routeKey(ev({ key: "x" }), { ...base, entity: "pr", view: "overview" }).action).toBeNull();
+  });
+  it("R (⇧R) resolves the focused thread from the keyboard, in a thread surface", () => {
+    // V1: the keyboard-resolve flow verb. Live in a thread surface (topology shelf
+    // or the Models code diff) — the registry's `resolve` (inThreads) action.
+    expect(routeKey(ev({ key: "R", rawKey: "R", shiftKey: true }), base).action).toEqual({ kind: "resolve-from-keyboard" });
+    expect(routeKey(ev({ key: "R", rawKey: "R", shiftKey: true }), { ...base, entity: "models", view: "code", codeMode: "diff" }).action).toEqual({ kind: "resolve-from-keyboard" });
+  });
+  it("R is inert where no thread surface exists (e.g. PR overview)", () => {
+    expect(routeKey(ev({ key: "R", rawKey: "R", shiftKey: true }), { ...base, entity: "pr", view: "overview" }).action).toBeNull();
+  });
+  it("[ / ] step the running hunk cursor in a diff surface (the S5 cursor deferral V1 owns)", () => {
+    const diff = { ...base, entity: "models" as const, view: "code" as const, codeMode: "diff" as const };
+    expect(routeKey(ev({ key: "[" }), diff).action).toEqual({ kind: "step-hunk", dir: -1 });
+    expect(routeKey(ev({ key: "]" }), diff).action).toEqual({ kind: "step-hunk", dir: 1 });
+  });
+  it("[ / ] are inert outside a diff/thread surface", () => {
+    expect(routeKey(ev({ key: "[" }), { ...base, entity: "pr", view: "overview" }).action).toBeNull();
   });
   it("d / f set code-mode in the Code view, data-mode in the Data view", () => {
     expect(routeKey(ev({ key: "d" }), { ...base, view: "code" }).action).toEqual({ kind: "set-code-mode", mode: "diff" });

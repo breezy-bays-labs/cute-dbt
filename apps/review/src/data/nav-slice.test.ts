@@ -57,6 +57,13 @@ describe("deriveView — view = viewMap[entity] || AVAIL[entity][0]", () => {
     const vm = { ...NAV_DEFAULTS.viewMap, models: "files" as View }; // not a Models view
     expect(deriveView(vm, "models")).toBe("topology");
   });
+  it("KEEPS an off-matrix-but-ROUTABLE remembered view (Models `code`, the V1 review surface)", () => {
+    // Models `code` is off the AVAIL matrix but routeTarget resolves it — the
+    // review-flow keys (mark-reviewed-advance / next-unreviewed) set it, and it
+    // must survive deriveView instead of snapping back to topology.
+    const vm = { ...NAV_DEFAULTS.viewMap, models: "code" as View };
+    expect(deriveView(vm, "models")).toBe("code");
+  });
   it("falls back when the entity has no remembered view", () => {
     const vm = { ...NAV_DEFAULTS.viewMap } as Record<Entity, View>;
     delete (vm as Record<string, View>)["pr"];
