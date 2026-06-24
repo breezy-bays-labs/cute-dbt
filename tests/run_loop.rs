@@ -675,6 +675,207 @@ fn findings_out_writes_the_envelope_sidecar_alongside_the_html() {
     assert!(json.ends_with("}\n"), "trailing newline (diff-friendly)");
 }
 
+// ===== cute-dbt#491 — --context-out standalone context artifact =========
+//
+// `--context-out` emits the SAME payload the report inlines as standalone,
+// schema-versioned JSON, additively beside the HTML report (the
+// `--findings-out` sidecar precedent). The HTML report stays byte-identical;
+// the artifact's `data` is byte-identical to the inlined payload.
+
+/// Slice the inlined `<script id="cute-dbt-data">…</script>` JSON out of a
+/// rendered report HTML — the SSOT blob the context artifact must mirror.
+fn inlined_payload_json(html: &str) -> &str {
+    let open = "<script type=\"application/json\" id=\"cute-dbt-data\">";
+    let start = html.find(open).expect("the data script tag is present") + open.len();
+    let rest = &html[start..];
+    let end = rest.find("</script>").expect("the data script tag closes");
+    &rest[..end]
+}
+
+#[test]
+fn context_out_emits_the_versioned_payload_and_keeps_the_html_byte_identical() {
+    // One invocation writes BOTH the HTML report AND the standalone context
+    // artifact (the additive-sidecar shape). The HTML written with
+    // `--context-out` is byte-identical to the HTML written without it (the
+    // schema_version lives only in the context wrapper), and the artifact's
+    // `data` sub-tree parses equal to the report's inlined payload.
+    let html_plain = tmp("context_plain.html");
+    let html_with = tmp("context_with.html");
+    let context = tmp("context_artifact.json");
+    clear(&html_plain);
+    clear(&html_with);
+    clear(&context);
+
+    let base = |out: &Path| -> Vec<String> {
+        vec![
+            "report".to_owned(),
+            "--manifest".to_owned(),
+            s(&fixture("jaffle-shop-current.json")).to_owned(),
+            "--baseline-manifest".to_owned(),
+            s(&fixture("jaffle-shop-baseline.json")).to_owned(),
+            "--out".to_owned(),
+            s(out).to_owned(),
+        ]
+    };
+
+    // (1) the report WITHOUT --context-out.
+    let plain_args = base(&html_plain);
+    let plain_refs: Vec<&str> = plain_args.iter().map(String::as_str).collect();
+    let plain = run(&plain_refs);
+    assert!(plain.status.success(), "plain report exits 0: {plain:?}");
+
+    // (2) the report WITH --context-out.
+    let mut with_args = base(&html_with);
+    with_args.push("--context-out".to_owned());
+    with_args.push(s(&context).to_owned());
+    let with_refs: Vec<&str> = with_args.iter().map(String::as_str).collect();
+    let with = run(&with_refs);
+    assert!(
+        with.status.success(),
+        "report with --context-out exits 0: {with:?}"
+    );
+
+    // The HTML report is byte-identical with vs without the flag.
+    let plain_html = std::fs::read_to_string(&html_plain).expect("plain html");
+    let with_html = std::fs::read_to_string(&html_with).expect("with html");
+    assert_eq!(
+        plain_html, with_html,
+        "--context-out leaves the HTML report byte-identical"
+    );
+
+    // The context artifact: a versioned header + the inlined payload verbatim.
+    let artifact = std::fs::read_to_string(&context).expect("context artifact written");
+    assert!(
+        artifact.ends_with("}\n"),
+        "trailing newline (diff-friendly): {artifact}"
+    );
+    let value: serde_json::Value = serde_json::from_str(&artifact).expect("artifact is valid JSON");
+    assert!(
+        value["metadata"]["schema_version"].is_u64(),
+        "integer schema_version header: {value}"
+    );
+    assert_eq!(
+        value["metadata"]["schema_version"],
+        serde_json::json!(1),
+        "schema_version pins to 1"
+    );
+
+    // The `data` sub-tree is byte-identical (parse-equal) to what the report
+    // inlined — the SSOT-producer contract.
+    let inlined = inlined_payload_json(&with_html);
+    let inlined_value: serde_json::Value =
+        serde_json::from_str(inlined).expect("inlined payload parses");
+    assert_eq!(
+        value["data"], inlined_value,
+        "context `data` == the report's inlined payload"
+    );
+}
+
+#[test]
+fn context_out_equal_to_out_is_a_usage_error() {
+    // `--context-out` resolving to `--out` would clobber the HTML report with
+    // the context JSON — an exit-2 usage conflict (the `--findings-out`
+    // precedent), raised before the run starts.
+    let out = tmp("context_clobber.html");
+    clear(&out);
+    let output = run(&[
+        "report",
+        "--manifest",
+        s(&fixture("jaffle-shop-current.json")),
+        "--baseline-manifest",
+        s(&fixture("jaffle-shop-baseline.json")),
+        "--out",
+        s(&out),
+        "--context-out",
+        s(&out),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "--context-out == --out is a usage error: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--context-out") && stderr.contains("--out"),
+        "the conflict message names both flags: {stderr}"
+    );
+}
+
+#[test]
+fn context_out_equal_to_findings_out_is_a_usage_error_before_any_write() {
+    // gemini on PR #504 — the sidecar-vs-sidecar pair: `--findings-out X
+    // --context-out X` would clobber the findings envelope with the context
+    // envelope on an otherwise-successful run. `--out` is distinct, so this
+    // collision is only caught by the generalized pairwise check. Rejected
+    // as a usage error (exit 2) BEFORE any artifact is written.
+    let html = tmp("sidecar_collision.html");
+    let sidecar = tmp("sidecar_collision.json");
+    clear(&html);
+    clear(&sidecar);
+    let output = run(&[
+        "report",
+        "--manifest",
+        s(&fixture("jaffle-shop-current.json")),
+        "--baseline-manifest",
+        s(&fixture("jaffle-shop-baseline.json")),
+        "--out",
+        s(&html),
+        "--findings-out",
+        s(&sidecar),
+        "--context-out",
+        s(&sidecar),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(2),
+        "--context-out == --findings-out is a usage error: {output:?}"
+    );
+    assert!(
+        !html.exists() && !sidecar.exists(),
+        "the collision is rejected before any artifact is written"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("--findings-out") && stderr.contains("--context-out"),
+        "the conflict message names both sidecar flags: {stderr}"
+    );
+}
+
+#[test]
+fn an_unwritable_context_out_path_is_reported() {
+    // The --context-out twin of `an_unwritable_findings_out_path_is_reported`:
+    // a context path under a directory that does not exist makes
+    // `write_context_artifact` fail, so the run loop reports the write error
+    // (exit 1) instead of swallowing it or panicking. Without this test a
+    // future `let _ = write_context_artifact(...)` would silently regress the
+    // surfaced-error contract. The HTML --out path IS writable here, so the
+    // failure is specifically the context artifact's.
+    let html = tmp("context_unwritable.html");
+    let context = tmp("no_such_dir/context.json");
+    clear(&html);
+    let output = run(&[
+        "report",
+        "--manifest",
+        s(&fixture("jaffle-shop-current.json")),
+        "--baseline-manifest",
+        s(&fixture("jaffle-shop-baseline.json")),
+        "--out",
+        s(&html),
+        "--context-out",
+        s(&context),
+    ]);
+    assert_eq!(
+        output.status.code(),
+        Some(1),
+        "an unwritable context-out path exits 1: {output:?}"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("could not write"),
+        "stderr reports the context-write failure: {stderr}"
+    );
+}
+
 // ===== cute-dbt#393 — finding→line anchors + GitHub annotations =========
 
 #[test]
