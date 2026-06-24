@@ -60,6 +60,18 @@ const DiffLineSchema = z.object({
 
 const BlockDiffSchema = z.object({ lines: z.array(DiffLineSchema) });
 
+// Model-YAML section (render.rs ModelYamlPayload). `missing` is the truthful
+// degrade COPY — Rust `Option<String>`, NOT a bool (the type-drift this gate
+// exists to surface). Tolerant + open: every field optional, .passthrough().
+const ModelYamlPayloadSchema = z
+  .object({
+    path: z.string().optional(),
+    raw: z.string().optional(),
+    diff: BlockDiffSchema.optional(),
+    missing: z.string().optional(),
+  })
+  .passthrough();
+
 const AxesSchema = z.object({
   body: z.boolean(),
   config: z.boolean(),
@@ -78,6 +90,10 @@ const ModelPayloadSchema = z
     compiled_sql: z.record(z.string(), z.string()),
     raw_sql: z.string().optional(),
     sql_diff: BlockDiffSchema.optional(),
+    // nullish: the wire emits an explicit `null` on models with no authored
+    // YAML (e.g. an `added` model — verified order_status_pivot in
+    // context.440.json) as well as omitting it entirely.
+    model_yaml: ModelYamlPayloadSchema.nullish(),
     // omitted/null on a `deleted` model (no compiled structure to inspect) —
     // verified absent on legacy_order_rollup in context.440.json.
     is_recursive: z.boolean().nullish(),
@@ -127,12 +143,53 @@ const PrRefSchema = z.object({
   url: z.string(),
 });
 
+// pr_comments (render.rs CommentsView). TOLERANT by design — the tolerate-thin
+// strategy: pin the load-bearing thread/comment spine (so a malformed payload
+// fails loudly) while leaving every field optional + open (.passthrough()) for
+// S5 enrichment. `author` is nullable (ghost author ⇒ null); `body` required.
+// `line` is optional+nullable (absent/null on outdated threads — verified in
+// context.sample.json thread[0]).
+const RenderedCommentSchema = z
+  .object({
+    author: z.string().nullable(),
+    body: z.string(),
+  })
+  .passthrough();
+
+const RenderedThreadSchema = z
+  .object({
+    model: z.string().optional(),
+    path: z.string().optional(),
+    line: z.number().nullish(),
+    side: ThreadSideSchema.optional(),
+    outdated: z.boolean().optional(),
+    resolved: z.boolean().optional(),
+    comments: z.array(RenderedCommentSchema),
+  })
+  .passthrough();
+
+const ModelCommentBucketSchema = z
+  .object({
+    path: z.string().optional(),
+    model: z.string().optional(),
+    threads: z.array(RenderedThreadSchema),
+  })
+  .passthrough();
+
+const CommentsViewSchema = z
+  .object({
+    by_model: z.array(ModelCommentBucketSchema),
+    unanchored: z.array(RenderedThreadSchema).optional(),
+  })
+  .passthrough();
+
 // The top-level context. Tolerant: only `baseline` + `models[]` are required;
 // every broad section is optional + the object is open (.passthrough()).
 export const ContextDataSchema = z
   .object({
     baseline: z.string(),
     models: z.array(ModelPayloadSchema),
+    pr_comments: CommentsViewSchema.optional(),
     pr_dag: PrDagPayloadSchema.optional(),
     pr_ref: PrRefSchema.optional(),
     removed_models: z.array(z.string()).optional(),

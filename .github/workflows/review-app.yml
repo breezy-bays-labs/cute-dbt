@@ -39,6 +39,10 @@ jobs:
         working-directory: apps/review
     steps:
       - uses: actions/checkout@v4
+        # The job needs no authenticated git after checkout (gates only read the
+        # tree), so don't persist GITHUB_TOKEN into the local git config.
+        with:
+          persist-credentials: false
 
       # Install the pinned bun (1.3.10) via the official curl installer — no
       # third-party setup action (allowlist-safe).

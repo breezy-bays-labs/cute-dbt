@@ -7,9 +7,12 @@
 //
 // ALLOW-LISTED exception: the BUNDLED elkjs worker chunk. It is a same-origin
 // vendored asset Vite emits for `new Worker(new URL("../worker/elk.worker.ts",
-// import.meta.url))` — local-first by construction (no CDN worker URL). We pin
-// it to a single `*.worker-*.js` (or assets/…worker…) file and still reject any
-// theme/lang/wasm/oniguruma chunk.
+// import.meta.url))` — local-first by construction (no CDN worker URL). The
+// allow-list is pinned NARROWLY to the exact emitted filename shape
+// (`assets/elk.worker-<hash>.js`) — a broad `/worker/i` would exempt any
+// `*worker*.js` chunk from this LOAD-BEARING zero-egress gate. We additionally
+// enforce that EXACTLY ONE worker chunk exists (0 or >1 fails). All
+// theme/lang/wasm/oniguruma chunks are still rejected.
 import { readdirSync, statSync, readFileSync } from "node:fs";
 import { resolve, join } from "node:path";
 
@@ -42,8 +45,10 @@ const FORBIDDEN_CONTENT = [
   { re: /(["'])\/\/[a-z0-9.-]+\.[a-z]{2,}\//i, why: "protocol-relative URL literal" },
 ];
 
-// The ONE allow-listed local-first worker chunk.
-const WORKER_ALLOW = /worker/i;
+// The ONE allow-listed local-first worker chunk — pinned to the exact emitted
+// shape `assets/elk.worker-<hash>.js` (Vite hashes the basename). Anything
+// matching `*worker*` more broadly is NOT exempt from the forbidden-name gate.
+const WORKER_ALLOW = /(^|\/)(assets\/)?elk\.worker-[A-Za-z0-9_-]+\.js$/;
 
 function walk(dir) {
   const out = [];
@@ -92,6 +97,17 @@ const workerJs = files.filter((f) => /\.js$/.test(f) && WORKER_ALLOW.test(f));
 if (entryJs.length !== 1) {
   console.error(
     `\nFAIL: expected exactly 1 entry JS chunk, found ${entryJs.length}: ${entryJs.join(", ")}`,
+  );
+  failed = true;
+}
+
+// 4. Exactly ONE allow-listed worker chunk must exist. The allow-list narrowly
+// exempts the elk worker from the forbidden-name gate; if Vite ever stops
+// emitting it (0) or emits more than one (>1), the allow-list could be silently
+// covering an unexpected chunk — fail loudly either way.
+if (workerJs.length !== 1) {
+  console.error(
+    `\nFAIL: expected exactly 1 allow-listed worker chunk, found ${workerJs.length}: ${workerJs.join(", ") || "none"}`,
   );
   failed = true;
 }

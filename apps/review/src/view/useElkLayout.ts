@@ -72,6 +72,17 @@ export function useElkLayout(nodes: FlowNode[], edges: FlowEdge[]): FlowNode[] {
 
     return () => {
       cancelled = true;
+      // Terminate the bundled elk worker on unmount / re-layout — elkjs never
+      // disposes it itself, so without this each graph change (and every
+      // unmount) leaks a live Worker. Guarded: only call when the instance and
+      // the method exist (elkjs 0.11.1 exposes ELK#terminateWorker). Clear the
+      // ref so the next layout constructs a fresh ELK + worker (the terminated
+      // worker can't service further postMessage calls).
+      const elkToDispose = elkRef.current;
+      if (elkToDispose && typeof elkToDispose.terminateWorker === "function") {
+        elkToDispose.terminateWorker();
+        elkRef.current = null;
+      }
     };
   }, [nodeKey, edgeKey]);
 

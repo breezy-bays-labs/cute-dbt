@@ -69,7 +69,10 @@ export interface ModelYamlPayload {
   path?: string;
   raw?: string;                  // the authoring YAML block (verbatim)
   diff?: BlockDiff;              // present if the model's own YAML block changed
-  missing?: boolean;
+  // Rust wire type is `Option<String>` (render.rs ModelYamlPayload.missing):
+  // truthful degrade COPY naming what is absent (verified in context.sample.json
+  // — "No schema file declares this model …"), NOT a boolean flag.
+  missing?: string;
 }
 
 export interface BlockDiff { lines: DiffLine[]; }

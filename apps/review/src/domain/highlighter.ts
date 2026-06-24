@@ -81,6 +81,9 @@ registerCustomLanguage("yaml", () => Promise.resolve({ default: yamlLang }) as n
 
 const LANGS = ["sql", "yaml"] as const;
 
+// Cumulative set of every shiki theme ever requested. We pass the WHOLE set to
+// each preloadHighlighter call (NOT just the new request) — see the contract
+// note on ensureHighlighter.
 const preloaded = new Set<string>();
 
 /**
@@ -88,13 +91,29 @@ const preloaded = new Set<string>();
  * shared highlighter BEFORE first render. Rethrows on failure — an unregistered
  * theme makes preloadHighlighter REJECT, which is the LOUD-FAIL path (no silent
  * github-dark fallback).
+ *
+ * NON-ADDITIVE CONTRACT (cute-dbt#488, @pierre/diffs 1.2.11): `preloadHighlighter`
+ * takes the FULL desired `{ themes, langs }` set on every call — its public
+ * contract is "make the shared highlighter hold exactly this set", NOT "add this
+ * to whatever is already loaded". This module is called MULTIPLE times (main.tsx
+ * once at boot + App.tsx on every theme switch), each with only the active theme.
+ * So we accumulate every requested theme in `preloaded` and pass the UNION to
+ * each call — a theme switch never drops previously-loaded themes. Do NOT
+ * "optimize" this to pass only the newly-requested name: that relies on the
+ * highlighter's current internal accumulation (an implementation detail), and a
+ * `disposeHighlighter`/version bump would silently break multi-theme render. The
+ * S5 multi-theme work depends on this union semantics.
  */
 export async function ensureHighlighter(themeShikiNames: string[]): Promise<void> {
-  const fresh = themeShikiNames.filter((t) => !preloaded.has(t));
+  // Union of every previously-loaded theme + the new request; commit to
+  // `preloaded` only AFTER a successful preload so a rejected (unregistered)
+  // theme is not re-sent on the next call (it would re-reject loudly).
+  const wanted = new Set(preloaded);
+  for (const t of themeShikiNames) wanted.add(t);
   await preloadHighlighter({
-    themes: themeShikiNames,
+    themes: [...wanted],
     langs: [...LANGS],
     preferredHighlighter: "shiki-js",
   });
-  for (const t of fresh) preloaded.add(t);
+  for (const t of wanted) preloaded.add(t);
 }
