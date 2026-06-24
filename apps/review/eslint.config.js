@@ -15,6 +15,8 @@ export default tseslint.config(
       "playwright-report/**",
       "test-results/**",
       "coverage/**",
+      ".stryker-tmp/**", // Stryker's per-mutant sandbox (injects @ts-nocheck) — never lint
+      "reports/**", // Stryker JSON mutation report
       "*.cjs",
       "*.config.{js,ts}",
     ],
@@ -27,14 +29,17 @@ export default tseslint.config(
     settings: {
       "boundaries/include": ["src/**/*"],
       "boundaries/elements": [
-        // Order: most-specific first. Each src/ subtree is a layer.
-        { type: "domain", pattern: "src/domain/*" },
-        { type: "data", pattern: "src/data/*" },
-        { type: "worker", pattern: "src/worker/*" },
-        { type: "view", pattern: "src/view/*" },
-        { type: "chrome", pattern: "src/chrome/*" },
+        // Order: most-specific first. Each src/ subtree is a layer. The `**`
+        // recurses into NESTED dirs (e.g. src/domain/data/* — the S3b reshapers)
+        // so the boundary FF covers sub-packages, not just direct children (a `*`
+        // matched only one segment, silently exempting nested files).
+        { type: "domain", pattern: "src/domain/**" },
+        { type: "data", pattern: "src/data/**" },
+        { type: "worker", pattern: "src/worker/**" },
+        { type: "view", pattern: "src/view/**" },
+        { type: "chrome", pattern: "src/chrome/**" },
         { type: "entry", pattern: "src/{main,styles,vite-env}.*", mode: "file" },
-        { type: "stub", pattern: "src/stubs/*" },
+        { type: "stub", pattern: "src/stubs/**" },
         { type: "fixture", pattern: "src/fixtures/*", mode: "file" },
       ],
     },

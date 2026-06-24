@@ -27,6 +27,15 @@ const ROLE_STYLE: Record<NodeRole, React.CSSProperties> = {
     clipPath: "polygon(8% 0, 92% 0, 100% 50%, 92% 100%, 8% 100%, 0 50%)",
     paddingLeft: 18, paddingRight: 18,
   },
+  // raw_dag / column-graph roles reuse the structural styles (the compiled CTE
+  // DAG never emits these; they appear only in the raw/column lineage panes).
+  cte: { background: "#2a2b36", color: "#cdd6f4", border: "1px solid #6c7086", borderRadius: 4 },
+  zone: { background: "#2a2b36", color: "#cdd6f4", border: "1px dashed #e69f00", borderRadius: 4 },
+  terminal: {
+    background: "#5a4410", color: "#f9e2af", border: "1px solid #e69f00", borderRadius: 4,
+    clipPath: "polygon(8% 0, 92% 0, 100% 50%, 92% 100%, 8% 100%, 0 50%)",
+    paddingLeft: 18, paddingRight: 18,
+  },
 };
 
 function CteNode({ data }: NodeProps): React.ReactElement {

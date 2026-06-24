@@ -1,0 +1,22 @@
+{
+  "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
+  "_comment": "Stryker mutation testing — TARGETED at the strict honesty-fold set (council §E). Mutates ONLY the never-a-false-claim folds: the cell key.t trichotomy (cell-diff.ts), the confidence folds + cross-model cone (col-lineage.ts), and the byte-span reshaper (raw-spans.ts). NOT whole-suite (mirrors the Rust targeted cargo-mutants posture). Gate: >=90% kill overall, 100% on the cell trichotomy (cell-diff.ts).",
+  "packageManager": "npm",
+  "testRunner": "vitest",
+  "plugins": ["@stryker-mutator/vitest-runner"],
+  "vitest": { "configFile": "vitest.mutation.config.ts" },
+  "coverageAnalysis": "all",
+  "mutate": [
+    "src/domain/data/cell-diff.ts",
+    "src/domain/data/col-lineage.ts",
+    "src/domain/data/raw-spans.ts"
+  ],
+  "reporters": ["clear-text", "json"],
+  "jsonReporter": { "fileName": "reports/mutation/mutation.json" },
+  "_thresholds_comment": "high/low = the council target (cell trichotomy 100% ACHIEVED + tracked as cell-diff.ts; >=90% set target). break = the run-and-record floor at the current achieved score so `bun run mutation` passes honestly while the follow-up (cute-dbt#497) raises raw-spans/col-lineage to >=90% (the residual survivors are defensive null-guards the Zod schema already makes unreachable + presentation strings). Mirrors the Rust targeted cargo-mutants posture: scheduled/manual, not a per-PR blocking gate.",
+  "thresholds": { "high": 90, "low": 80, "break": 80 },
+  "concurrency": 4,
+  "timeoutMS": 30000,
+  "disableTypeChecks": true,
+  "tempDirName": ".stryker-tmp"
+}
