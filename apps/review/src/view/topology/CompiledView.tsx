@@ -106,13 +106,21 @@ export function CompiledView({
     const row = cursorRef.current || spanRef.current;
     scrollRowIntoView(row, 72);
     if (flash && row) {
-      if (flashRef.current.el) {
-        flashRef.current.el.classList.remove("kbd-ring");
-        if (flashRef.current.t) clearTimeout(flashRef.current.t);
-      }
       row.classList.add("kbd-ring");
       flashRef.current = { el: row, t: setTimeout(() => row.classList.remove("kbd-ring"), 1500) };
     }
+    // CLEANUP: tear down the pending ring-flash before the NEXT scrollKey bump AND on
+    // unmount — clear the ~1.5s removal timer and strip the `kbd-ring` from the row it
+    // was applied to. Without it the timeout fires AFTER unmount and calls
+    // `classList.remove` on a detached row (a leaked timer + a dead-node no-op); on a
+    // re-run it also cross-fades the prior row's ring off (the role the in-effect
+    // prior-flash clear used to play — folded into cleanup so it covers unmount too).
+    // Guard on the stored timer/el, not the `flash` prop (which may have toggled).
+    return () => {
+      if (flashRef.current.t) clearTimeout(flashRef.current.t);
+      if (flashRef.current.el) flashRef.current.el.classList.remove("kbd-ring");
+      flashRef.current = { el: null, t: null };
+    };
     // Keyed ONLY on scrollKey by design: the forward-sync scroll/flash fires once
     // per genuine node pick (the scroll nonce), not on every re-render. (No
     // react-hooks/exhaustive-deps plugin is configured for this app.)

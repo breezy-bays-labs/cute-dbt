@@ -223,6 +223,12 @@ function sideTable(maps: SyncMaps, side: CodeSide): Record<string, LineSpan> {
  *  `(final select)` node), is an honest null — the caller treats it as a no-op.
  *  `side` defaults to "compiled" so the historical compiled-only callers are
  *  source-compatible. */
+// tracked: cute-dbt#517 — equivalent: the `side` default `"compiled"`→`""` mutant.
+// `side` is observed ONLY through `sideTable`, which branches on `=== "raw"`; any
+// non-"raw" string (incl. "") selects the SAME compiled `nodeSpans` table, so the
+// default value is behaviorally indistinguishable from "compiled". (The live `"raw"`
+// literal in sideTable IS killed by the raw-side resolution tests.)
+// Stryker disable next-line StringLiteral
 export function spanForNode(maps: SyncMaps, id: string | null, side: CodeSide = "compiled"): LineSpan | null {
   // tracked: cute-dbt#517 — equivalent: a falsy `id` indexes the side table to
   // `undefined`, which the `?? null` already maps to `null`; dropping this guard
@@ -235,6 +241,10 @@ export function spanForNode(maps: SyncMaps, id: string | null, side: CodeSide = 
 /** Compiled reverse resolution: a compiled line → its innermost DAG node (or null).
  *  `side` selects the table (compiled `nodeSpans` vs raw `rawNodeSpans`); it
  *  defaults to "compiled" so the historical compiled-only callers are unchanged. */
+// tracked: cute-dbt#517 — equivalent: the `side` default `"compiled"`→`""` mutant —
+// observed only via `sideTable`'s `=== "raw"` test, so "" and "compiled" pick the
+// same compiled table (see spanForNode above).
+// Stryker disable next-line StringLiteral
 export function nodeForLine(maps: SyncMaps, line: number | null, side: CodeSide = "compiled"): string | null {
   return innermostSpan(sideTable(maps, side), line);
 }
@@ -363,6 +373,10 @@ export function inSpanCursor(cursor: number | null, sp: LineSpan): number | null
  * (innermost-span-wins) is UNCHANGED — only forward's landing line is made
  * round-trip-stable.
  */
+// tracked: cute-dbt#517 — equivalent: the `side` default `"compiled"`→`""` mutant —
+// `side` is threaded only into `nodeForLine`→`sideTable` (`=== "raw"`), so "" and
+// "compiled" resolve against the same compiled table (see spanForNode above).
+// Stryker disable next-line StringLiteral
 export function forwardSnapTarget(maps: SyncMaps, node: string, sp: LineSpan, side: CodeSide = "compiled"): number {
   // tracked: cute-dbt#517 — equivalent: this early return is a clarity/perf
   // short-circuit for the common case. The loop below starts at `sp.start.line`, so
@@ -391,6 +405,10 @@ export function forwardSnapTarget(maps: SyncMaps, node: string, sp: LineSpan, si
  *     `lastScrolledRef` guard) — re-running with the same node is idempotent.
  * The whole transition collapses to `===` when nothing changed (anti-loop).
  */
+// tracked: cute-dbt#517 — equivalent: the `side` default `"compiled"`→`""` mutant —
+// `side` is threaded into `spanForNode`/`forwardSnapTarget`→`sideTable` (`=== "raw"`),
+// so "" and "compiled" both select the compiled table (see spanForNode above).
+// Stryker disable next-line StringLiteral
 export function syncForward(s: SyncState, maps: SyncMaps, side: CodeSide = "compiled"): SyncState {
   // tracked: cute-dbt#517 — equivalent: with `s.node` null/empty,
   // `spanForNode(maps, null)` returns null and the next `if (!sp) return s` fires

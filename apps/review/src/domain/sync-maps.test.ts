@@ -146,4 +146,60 @@ describe("buildSyncMaps — assemble SyncMaps from a model's code_map", () => {
     expect(maps!.nodeSpans).toEqual({});
     expect(maps!.rawNodeSpans!.events).toEqual({ start: { line: 1, col: 1, byte: 0 }, end: { line: 3, col: 1, byte: 0 } });
   });
+
+  it("PROTOTYPE POLLUTION: a model/CTE/zone named `__proto__`/`constructor` is inert (no Object.prototype pollution, resolvers don't crash)", () => {
+    // every key in nodeSpans/rawNodeSpans comes from an UNTRUSTED spine name, and the
+    // spine arrives as PARSED JSON — where `__proto__` is a genuine OWN-property (not
+    // swallowed by the literal `__proto__` setter). Copying that own-key into a plain
+    // `{}` via `obj[key] = span` re-triggers the magic setter (pollution / shadowing).
+    // With null-proto maps the keys are inert own-properties — the machine resolves
+    // over them without polluting Object.prototype and without a phantom inherited span.
+    const ns = JSON.parse(
+      '{"__proto__":{"start":{"line":1,"col":1,"byte":0},"end":{"line":2,"col":1,"byte":20}},' +
+        '"constructor":{"start":{"line":3,"col":1,"byte":30},"end":{"line":4,"col":1,"byte":40}},' +
+        '"events":{"start":{"line":5,"col":1,"byte":50},"end":{"line":9,"col":1,"byte":90}}}',
+    ) as Record<string, ReturnType<typeof span>>;
+    const rns = JSON.parse(
+      '{"__proto__":{"start":{"line":1,"col":1,"byte":0},"end":{"line":2,"col":1,"byte":20}},' +
+        '"constructor":{"start":{"line":3,"col":1,"byte":30},"end":{"line":4,"col":1,"byte":40}},' +
+        '"events":{"start":{"line":1,"col":1,"byte":0},"end":{"line":3,"col":1,"byte":30}}}',
+    ) as Record<string, ReturnType<typeof span>>;
+    // sanity: the JSON path really did create a `__proto__` own-key on the source.
+    expect(Object.prototype.hasOwnProperty.call(ns, "__proto__")).toBe(true);
+    const cm: CodeMap = {
+      compiled: "select 1\nselect 2\nselect 3",
+      node_spans: ns,
+      raw_node_spans: rns,
+      raw_zones: [{ kind: "for_loop", start: pos(33, 1605), end: pos(35, 1738), presence: "compiled_out" }],
+    };
+    const maps = buildSyncMaps(model(cm));
+    expect(maps).not.toBeNull();
+    // Object.prototype was NOT polluted — no span object leaked onto the global
+    // prototype via a magic `__proto__` assignment during the copy.
+    expect(Object.prototype).not.toHaveProperty("start");
+    expect(Object.prototype).not.toHaveProperty("line");
+    // the maps are null-proto: a `__proto__` own-key is inert data, not the chain.
+    expect(Object.getPrototypeOf(maps!.nodeSpans)).toBeNull();
+    expect(Object.getPrototypeOf(maps!.rawNodeSpans!)).toBeNull();
+    expect(Object.prototype.hasOwnProperty.call(maps!.nodeSpans, "__proto__")).toBe(true);
+    expect(Object.prototype.hasOwnProperty.call(maps!.rawNodeSpans!, "__proto__")).toBe(true);
+    // the honest `events` span still resolves; the zone adapter ran without crashing.
+    expect(maps!.nodeSpans.events).toBeDefined();
+    expect(maps!.rawNodeSpans!.events).toBeDefined();
+    expect(maps!.zones).toEqual([{ id: "z0", startLine: 33, endLine: 35 }]);
+  });
+
+  it("PROTOTYPE POLLUTION: a zone whose generated id is `__proto__` doesn't claim a phantom sync target", () => {
+    // node_map.raw["zone:0"] non-empty asserts the loop generated a node, but the
+    // membership guard resolves nodeId ONLY when `zone:0` is a real own-member of the
+    // (null-proto) rawNodeSpans table — a `__proto__` member must not be reached via
+    // the prototype chain. Here zone:0 is genuinely present, so nodeId IS set, while
+    // a `__proto__`-keyed span elsewhere stays inert.
+    const out = rawZonesToZoneSpans(
+      [{ kind: "for_loop", start: pos(10, 100), end: pos(18, 200), presence: "compiled_out" }],
+      Object.assign(Object.create(null), { "zone:0": span(11, 110, 17, 190) }) as Record<string, ReturnType<typeof span>>,
+      { "zone:0": ["status_orders"] },
+    );
+    expect(out).toEqual([{ id: "z0", startLine: 10, endLine: 18, nodeId: "zone:0" }]);
+  });
 });

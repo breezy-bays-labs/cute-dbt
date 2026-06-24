@@ -108,13 +108,24 @@ export function buildSyncMaps(
   const codeMap = codeMapArg !== undefined ? codeMapArg : model.code_map;
   if (!codeMap) return null;
 
-  const nodeSpans: Record<string, SyncLineSpan> = codeMap.node_spans ?? {};
+  // NULL-PROTO maps (matches the data-layer posture in raw-spans.ts / dataset.ts):
+  // every key here comes from a model/CTE/zone NAME (untrusted spine input). A key
+  // like `__proto__` or `constructor` on a plain `{}` would pollute Object.prototype
+  // (or shadow a built-in), and the machine's `for…in` / index resolvers would see a
+  // phantom span. `Object.create(null)` removes the prototype chain so those keys are
+  // inert data, never pollution — consistent with `innermostSpan`'s `hasOwnProperty`
+  // guard, which this complements (defence in depth, not redundancy).
+  const nodeSpans: Record<string, SyncLineSpan> = Object.create(null) as Record<string, SyncLineSpan>;
+  for (const id of Object.keys(codeMap.node_spans ?? {})) {
+    const sp = codeMap.node_spans?.[id];
+    if (sp) nodeSpans[id] = sp;
+  }
 
   // the unified raw line-spans (null when there is no raw side at all).
   const rawTable = buildRawSpans(model, codeMap);
   let rawNodeSpans: Record<string, SyncLineSpan> | undefined;
   if (rawTable) {
-    rawNodeSpans = {};
+    rawNodeSpans = Object.create(null) as Record<string, SyncLineSpan>;
     for (const id of Object.keys(rawTable)) {
       const sp = rawTable[id];
       if (sp) rawNodeSpans[id] = widenRawSpan(sp);
