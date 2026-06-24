@@ -104,6 +104,19 @@ test("S6b: honest-empty — a model with NO code_map renders the no-compiled-spa
   // no synced code lines exist (nothing fabricated).
   await expect(page.locator('[data-testid="topology-panes"] [data-testid="code-line"]')).toHaveCount(0);
 
+  // ── cute-dbt#497 finding 2: the honest-empty promise must hold on BOTH shelves.
+  // legacy_order_rollup has raw_sql but NO code_map (no source-map spine). The File
+  // (raw) toggle must be DISABLED so the model that declared "no source" can't
+  // escape to a raw listing under the "File" label.
+  const fileToggle = page.locator('[data-testid="shelf-toggle"][data-mode="raw"]');
+  await expect(fileToggle).toBeDisabled();
+  // a forced click (disabled buttons swallow real clicks) must NOT swap to a listing.
+  await fileToggle.click({ force: true }).catch(() => {});
+  await expect(page.locator('[data-testid="compiled-view-empty"]')).toBeVisible();
+  await expect(page.locator('[data-testid="topology-panes"] [data-testid="code-line"]')).toHaveCount(0);
+  // the shelf stayed compiled (never flipped to raw).
+  await expect(panes).toHaveAttribute("data-shelf", "compiled");
+
   expect(external, `external requests: ${external.join(", ")}`).toEqual([]);
 });
 
@@ -130,4 +143,42 @@ test("S6b: the raw⇄compiled source toggle swaps the pane source (DAG follows t
   await expect(page.locator('[data-testid="code-line"]').first()).toBeAttached();
 
   expect(external, `external requests: ${external.join(", ")}`).toEqual([]);
+});
+
+test("S6b: RAW shelf — clicking a {% for %} collapse (zone:N) node scrolls + ring-flashes the raw pane (cute-dbt#497 finding 1)", async ({ page }) => {
+  const external = await denyExternalNetwork(page);
+  const consoleErrors: string[] = [];
+  page.on("pageerror", (e) => consoleErrors.push("PAGEERROR: " + e.message));
+
+  await page.goto("/index.html", { waitUntil: "networkidle" });
+  await page.waitForSelector('[data-testid="entity-tabs"]');
+
+  // order_status_pivot collapses two {% for %} loops into templated zone:N nodes —
+  // raw-only DAG ids ABSENT from the compiled node_spans (the bug's signature node).
+  await selectModel(page, "order_status_pivot");
+  const panes = page.locator('[data-testid="topology-panes"]');
+  await expect(panes).toBeVisible();
+  await page.waitForSelector('[data-testid="topology-panes"] [data-testid="graph-node"]');
+
+  // switch to the File (raw) shelf so the DAG becomes the RAW graph.
+  await page.locator('[data-testid="shelf-toggle"][data-mode="raw"]').click();
+  await expect(panes).toHaveAttribute("data-dag-mode", "raw");
+  await page.waitForSelector('[data-testid="code-line"]');
+
+  // a templated ({% for %} collapse) node renders the distinct TEMPLATE treatment —
+  // NOT the incremental RAW ONLY marker (finding 3 made visible in the raw DAG).
+  const templated = page.locator('[data-testid="topology-dag"] [data-testid="graph-node"][data-templated="true"]').first();
+  await expect(templated).toBeAttached();
+
+  // FORWARD on the raw shelf: clicking the zone:N node must resolve its RAW span,
+  // scroll the raw pane, and ring-flash — not be a silent no-op (the bug).
+  await templated.click();
+  await expect(templated).toHaveAttribute("data-selected", "true");
+  // a row carries the ring-flash class (the forward scroll/flash fired on the raw pane).
+  await expect.poll(async () => page.locator('[data-testid="code-line"].kbd-ring').count(), { timeout: 2000 }).toBeGreaterThan(0);
+  // and the node's raw span is tinted in the pane (the raw span resolved).
+  await expect(page.locator('[data-testid="code-line"][data-in-span="true"]').first()).toBeAttached();
+
+  expect(external, `external requests: ${external.join(", ")}`).toEqual([]);
+  expect(consoleErrors, `page errors: ${consoleErrors.join(" | ")}`).toEqual([]);
 });

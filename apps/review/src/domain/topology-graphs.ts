@@ -46,11 +46,13 @@ export function cteDagToGraph(dag: DagPayload | null | undefined): GraphData {
 
 /**
  * rawGraphToGraphData — the RAW DAG (rawDagToGraph output) → the shared engine's
- * GraphData. Carries the §3a honesty markers VERBATIM: `templated` (a {% for %}
- * collapse) and `hasIncremental` (an is_incremental guard) → the engine's
- * incrementalOnly/hasIncremental render flags; the zone regions become selectable
- * concentric rings (GraphZone). Node ids stay the raw ids (`zone:N` for collapsed
- * loops) so the raw cursor-sync resolves over the SAME keys buildSyncMaps emits.
+ * GraphData. Carries the §3a honesty markers VERBATIM onto their OWN engine flags:
+ * `templated` (a {% for %} collapse) → `templated`, and `hasIncremental` (an
+ * is_incremental guard) → `hasIncremental` — the two are DISTINCT facts and are
+ * NEVER conflated (a loop collapse is not an is_incremental strip; cute-dbt#497
+ * finding 3). The zone regions become selectable concentric rings (GraphZone).
+ * Node ids stay the raw ids (`zone:N` for collapsed loops) so the raw cursor-sync
+ * resolves over the SAME keys buildSyncMaps emits.
  */
 export function rawGraphToGraphData(raw: RawGraph | null | undefined): GraphData {
   if (!raw) return { nodes: [], edges: [] };
@@ -59,7 +61,12 @@ export function rawGraphToGraphData(raw: RawGraph | null | undefined): GraphData
     label: n.label,
     sub: n.sub,
     tone: n.tone as NodeTone,
-    incrementalOnly: n.templated || undefined,
+    // `templated` (a {% for %} collapse) is carried as its OWN flag — NOT remapped
+    // onto `incrementalOnly` (an is_incremental strip), which would render a loop
+    // collapse with the incremental-amber treatment = a FALSE honesty claim
+    // (cute-dbt#497 finding 3). is_incremental() is carried separately via
+    // `hasIncremental`.
+    templated: n.templated || undefined,
     hasIncremental: n.hasIncremental,
   }));
   const edges: GraphData["edges"] = raw.edges.map(([a, b]) => [a, b]);

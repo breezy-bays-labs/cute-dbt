@@ -37,15 +37,18 @@ type Shelf = "compiled" | "raw";
 /** The sync-machine actions this container dispatches (each delegates to a pure
  *  S6a reducer — no extra logic lives in the reducer). */
 type SyncAction =
-  | { type: "selectNode"; id: string | null; maps: SyncMaps }
+  | { type: "selectNode"; id: string | null; side: "compiled" | "raw"; maps: SyncMaps }
   | { type: "selectZone"; id: string | null }
   | { type: "cursor"; line: number | null; side: "compiled" | "raw"; maps: SyncMaps };
 
 function syncReducer(state: SyncState, action: SyncAction): SyncState {
   switch (action.type) {
     case "selectNode":
-      // forward: select then run the forward sync (cursor snap + scroll nonce).
-      return syncForward(selectNode(state, action.id), action.maps);
+      // forward: select then run the SIDE-aware forward sync (cursor snap + scroll
+      // nonce). The side resolves the span against the active shelf's table, so a
+      // raw-only `zone:N`/`(final select)` node scrolls + flashes the raw pane
+      // instead of silently no-op'ing (cute-dbt#497 finding 1).
+      return syncForward(selectNode(state, action.id), action.maps, action.side);
     case "selectZone":
       return selectZone(state, action.id);
     case "cursor":
@@ -59,14 +62,15 @@ function syncReducer(state: SyncState, action: SyncAction): SyncState {
  *  region — both already in `maps`, so no recompute, no fabrication. */
 function activeSpan(maps: SyncMaps | null, state: SyncState, side: "compiled" | "raw") {
   if (!maps) return null;
-  if (side === "compiled") return spanForNode(maps, state.node);
+  if (side === "compiled") return spanForNode(maps, state.node, "compiled");
   // raw side
   if (state.zone) {
     const z = (maps.zones ?? []).find((zz) => zz.id === state.zone);
     return z ? { start: { line: z.startLine }, end: { line: z.endLine } } : null;
   }
-  if (state.node && maps.rawNodeSpans) return maps.rawNodeSpans[state.node] ?? null;
-  return null;
+  // a node on the raw shelf → its RAW span (the same table the forward sync now
+  // resolves over), so a raw-only `zone:N`/`(final select)` node tints too.
+  return spanForNode(maps, state.node, "raw");
 }
 
 export interface TopologyPanesProps {
@@ -100,8 +104,13 @@ export function TopologyPanes({ model, shiki }: TopologyPanesProps): React.React
   const activeGraph = dagMode === "raw" ? rawGraph : compiledGraph;
 
   // ── the pane text (compiled coords ← code_map.compiled; raw coords ← raw_sql) ─
+  // HONEST-EMPTY (cute-dbt#497 finding 2): a model with NO code_map (maps === null)
+  // has no source-map spine — the File/raw shelf must NOT render a bare raw_sql
+  // listing under a "File" label that contradicts the honest-empty pane. Gate the
+  // raw text on the spine, not on raw-text presence: with no maps there is no raw
+  // pane text and the File toggle disables.
   const compiledText = model.code_map?.compiled ?? "";
-  const rawText = model.raw_sql ?? model.code_map?.compiled ?? "";
+  const rawText = maps ? model.raw_sql ?? model.code_map?.compiled ?? "" : "";
   const paneSide: "compiled" | "raw" = shelf === "compiled" ? "compiled" : "raw";
   const paneText = paneSide === "compiled" ? compiledText : rawText;
 
@@ -112,16 +121,21 @@ export function TopologyPanes({ model, shiki }: TopologyPanesProps): React.React
     if (lastModel.current !== modelKey) {
       lastModel.current = modelKey;
       setShelf("compiled");
-      dispatch({ type: "selectNode", id: null, maps: maps ?? { nodeSpans: {} } });
+      // reset always lands on the compiled shelf → compiled side.
+      dispatch({ type: "selectNode", id: null, side: "compiled", maps: maps ?? { nodeSpans: {} } });
     }
   }, [modelKey, maps]);
 
   // ── FORWARD: a DAG node click → select + scroll the pane to its span ────────
+  // the forward sync resolves the span against the ACTIVE shelf's table (compiled
+  // `nodeSpans` vs raw `rawNodeSpans`), so a raw-only `zone:N`/`(final select)`
+  // node scrolls + flashes the raw pane (cute-dbt#497 finding 1).
   const onSelectNode = useCallback(
     (id: string) => {
-      dispatch({ type: "selectNode", id, maps: maps ?? { nodeSpans: {} } });
+      const side: "compiled" | "raw" = shelf === "raw" ? "raw" : "compiled";
+      dispatch({ type: "selectNode", id, side, maps: maps ?? { nodeSpans: {} } });
     },
-    [maps],
+    [maps, shelf],
   );
   const onSelectZone = useCallback((id: string) => {
     dispatch({ type: "selectZone", id });

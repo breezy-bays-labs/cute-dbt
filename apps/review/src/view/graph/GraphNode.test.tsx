@@ -68,6 +68,19 @@ describe("GraphNodeView — structural (tone) node", () => {
   it("an incrementalOnly node shows the RAW ONLY marker", () => {
     expect(render({ id: "r", label: "r", tone: "cte", incrementalOnly: true })).toContain("RAW ONLY");
   });
+  it("a templated ({% for %} collapse) node shows TEMPLATE — NOT the incremental RAW ONLY marker (cute-dbt#497 finding 3)", () => {
+    const html = render({ id: "z", label: "z", tone: "cte", templated: true });
+    expect(html).toContain("TEMPLATE");
+    expect(html).toContain('data-templated="true"');
+    // a {% for %} collapse is NOT an is_incremental strip — never the RAW ONLY badge.
+    expect(html).not.toContain("RAW ONLY");
+  });
+  it("an incrementalOnly node is never mislabeled as templated", () => {
+    const html = render({ id: "r", label: "r", tone: "cte", incrementalOnly: true });
+    expect(html).toContain("RAW ONLY");
+    expect(html).toContain('data-templated="false"');
+    expect(html).not.toContain("TEMPLATE");
+  });
   it("a dimmed node carries the dimmed flag; a cursor node draws the ring", () => {
     expect(render({ id: "d", label: "d", tone: "cte" }, { dimmed: true })).toContain('data-dimmed="true"');
     expect(render({ id: "c", label: "c", tone: "cte" }, { cursor: true })).toContain('data-testid="cursor-ring"');

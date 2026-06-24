@@ -73,10 +73,16 @@ describe("rawGraphToGraphData — raw DAG → GraphData (honesty markers verbati
     };
     const g = rawGraphToGraphData(raw);
     expect(g.nodes.map((n) => n.id)).toEqual(["events", "zone:0", "(final select)"]);
-    // the templated zone node carries incrementalOnly; the final carries hasIncremental.
-    expect(g.nodes.find((n) => n.id === "zone:0")!.incrementalOnly).toBe(true);
+    // the templated zone node carries `templated` (its OWN flag); the final carries
+    // hasIncremental. (cute-dbt#497 finding 3.)
+    expect(g.nodes.find((n) => n.id === "zone:0")!.templated).toBe(true);
     expect(g.nodes.find((n) => n.id === "(final select)")!.hasIncremental).toBe(true);
-    // un-templated import node has no incrementalOnly flag (no false claim).
+    // a {% for %} collapse is NOT an is_incremental strip — it must NEVER be marked
+    // incrementalOnly (that would render the incremental-amber treatment = a false
+    // honesty claim). cute-dbt#497 finding 3.
+    expect(g.nodes.find((n) => n.id === "zone:0")!.incrementalOnly).toBeUndefined();
+    // un-templated import node has neither flag (no false claim).
+    expect(g.nodes.find((n) => n.id === "events")!.templated).toBeUndefined();
     expect(g.nodes.find((n) => n.id === "events")!.incrementalOnly).toBeUndefined();
     // the zone region survives as a selectable ring.
     expect(g.zones).toEqual([{ id: "z0", label: "for loop", depth: 0, members: ["zone:0"] }]);
