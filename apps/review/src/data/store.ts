@@ -1,52 +1,172 @@
-// The Zustand store (S0 slice — selection only). Persists the selected model +
-// theme under a versioned `cute-dbt:` localStorage key. Later slices grow this
-// into the 5-slice store (data/nav/keymap/review/ui); S0 proves the persist wire.
+// The Zustand store (S2) — the 5-slice composition + versioned persist. Grows
+// the S0 selection skeleton into the dispatch-state spine: nav (entity /
+// per-entity viewMap / sel / prNode-split / history) + ui (overlays / codeAnchor)
+// + settings (theme/style/density + experiment gates) + the S1 keymap slice. The
+// S0 `selectedModel`/`theme` fields are SUBSUMED — selection now lives in
+// `sel.models`, theme in `settings.theme`.
+//
+// Persistence (discovery risk #6): ONE namespace (`cute-dbt:review`), the EXACT
+// prototype key NAMES as the persisted blob's fields (`entity` · `viewByEntity` ·
+// `sel` · `settings` · `sidebar` · `keymapOverride`), a versioned `migrate()`
+// that MERGES defaults (a new field appears for existing users — never a
+// wholesale replace), and FAIL-CLOSED load (any exception → pristine defaults).
+// Immer powers the nested-map slices.
 import { create } from "zustand";
-import { persist, createJSONStorage } from "zustand/middleware";
-import type { AppTheme } from "../domain/highlighter";
+import { persist, createJSONStorage, type PersistStorage, type StorageValue } from "zustand/middleware";
 import { createKeymapSlice, type KeymapSlice } from "./keymap-slice";
+import { createNavSlice, NAV_DEFAULTS, type NavSlice } from "./nav-slice";
+import { createUiSlice, UI_DEFAULTS, type UiSlice } from "./ui-slice";
+import {
+  createSettingsSlice,
+  mergeSettings,
+  SETTINGS_DEFAULTS,
+  type SettingsSlice,
+  type Settings,
+} from "./settings-slice";
 import { DENY_REBIND_KEYS, type Keymap } from "../domain/keymap";
+import type { Entity } from "../domain/keymap";
+import type { View } from "../domain/matrix";
+
+/** The persist namespace + version. Bump the version whenever a `migrate` is needed. */
+export const PERSIST_KEY = "cute-dbt:review";
+export const PERSIST_VERSION = 2;
+
+/** The full app state — the 5-slice union. */
+export type AppState = NavSlice & UiSlice & SettingsSlice & KeymapSlice;
 
 /**
- * Sanitize a persisted keymap override on hydration: drop any binding onto a
- * reserved/fixed token (the same `DENY_REBIND_KEYS` guard `rebindAction`
- * enforces at write time). Without this, a stale or hand-edited localStorage
- * blob could reintroduce a reserved binding (`Tab`, `Space`, an arrow, …) that
- * the live rebind path refuses — letting persisted state bypass the deny-list.
- * Non-object/missing input degrades to an empty override (fail-closed).
+ * Sanitize a persisted keymap override on hydration (unchanged from S1): drop any
+ * binding onto a reserved/fixed token (the `DENY_REBIND_KEYS` guard `rebindAction`
+ * enforces at write time). A stale or hand-edited blob can't reintroduce a
+ * reserved binding the live path refuses. Non-object input → empty (fail-closed).
  */
 export function sanitizeKeymapOverride(raw: unknown): Keymap {
   if (!raw || typeof raw !== "object") return {};
   const out: Keymap = {};
   for (const [id, token] of Object.entries(raw as Record<string, unknown>)) {
-    if (typeof token !== "string") continue; // drop malformed entries
-    if (DENY_REBIND_KEYS.has(token)) continue; // drop reserved bindings
+    if (typeof token !== "string") continue;
+    if (DENY_REBIND_KEYS.has(token)) continue;
     out[id] = token;
   }
   return out;
 }
 
-export const PERSIST_KEY = "cute-dbt:review";
-export const PERSIST_VERSION = 1;
+/**
+ * The PERSISTED SHAPE — the prototype's exact key NAMES as fields. We persist
+ * only the durable nav/ui/settings/keymap state (not history, not transient
+ * overlays). `viewByEntity` keeps the prototype's localStorage key name.
+ */
+interface PersistedShape {
+  entity: Entity;
+  viewByEntity: Record<Entity, View>;
+  sel: Record<Entity, string | null>;
+  sidebar: boolean;
+  settings: Settings;
+  keymapOverride: Keymap;
+}
 
-// The S0 selection slice + the S1 keymap slice. Later slices (nav/review/ui)
-// compose in the same way. The keymap slice owns only the sparse rebind override;
-// every binding/predicate lives in the pure domain registry.
-export interface AppState extends KeymapSlice {
-  selectedModel: string | null;
-  theme: AppTheme;
-  setSelectedModel: (name: string) => void;
-  setTheme: (theme: AppTheme) => void;
+/** What we write out (`partialize`) — the durable subset, under the prototype's key names. */
+function partialize(s: AppState): PersistedShape {
+  return {
+    entity: s.entity,
+    viewByEntity: s.viewMap,
+    sel: s.sel,
+    sidebar: s.overlays.sidebar,
+    settings: s.settings,
+    keymapOverride: s.keymapOverride,
+  };
+}
+
+/**
+ * The fail-closed, migrate-MERGE hydration. Every field MERGES over its slice
+ * defaults (a new default field appears for an existing user; persisted values
+ * win where present). Any malformed sub-blob degrades to its default in place —
+ * a corrupt/partial persisted state can never crash hydration or drop unrelated
+ * settings (the wholesale-replace anti-pattern risk #6 names). Returns a partial
+ * the persist `merge` lays over the live `current` state.
+ */
+export function hydrateMerge(persisted: unknown): Partial<AppState> {
+  if (!persisted || typeof persisted !== "object") return {};
+  const p = persisted as Partial<PersistedShape>;
+  const out: Partial<AppState> = {};
+
+  if (typeof p.entity === "string") out.entity = p.entity as Entity;
+  // viewByEntity → viewMap, merged over the nav defaults so a new entity key
+  // (or a missing one in an old blob) falls back to its default view.
+  out.viewMap =
+    p.viewByEntity && typeof p.viewByEntity === "object"
+      ? { ...NAV_DEFAULTS.viewMap, ...p.viewByEntity }
+      : { ...NAV_DEFAULTS.viewMap };
+  out.sel =
+    p.sel && typeof p.sel === "object"
+      ? { ...NAV_DEFAULTS.sel, ...p.sel }
+      : { ...NAV_DEFAULTS.sel };
+  // settings: the migrate-MERGE — defaults + persisted, so a NEW settings field
+  // appears for an existing user at its default (never dropped, never wholesale).
+  out.settings = mergeSettings(p.settings);
+  // the sidebar panel flag merges into the overlays defaults.
+  out.overlays = {
+    ...UI_DEFAULTS.overlays,
+    sidebar: typeof p.sidebar === "boolean" ? p.sidebar : UI_DEFAULTS.overlays.sidebar,
+  };
+  // keymap override: sanitized through the deny-list (reserved tokens can't survive).
+  out.keymapOverride = sanitizeKeymapOverride(p.keymapOverride);
+
+  return out;
+}
+
+/**
+ * A FAIL-CLOSED storage wrapper. If `JSON.parse` (or any read) throws on a
+ * corrupt blob, hydration silently falls back to defaults rather than crashing
+ * the app — the load-half of the risk-#6 contract (the `merge`/`migrate` hooks
+ * only run on a SUCCESSFULLY-parsed value, so the parse itself must be guarded).
+ */
+function failClosedStorage(): PersistStorage<Partial<AppState>> | undefined {
+  const inner = createJSONStorage<Partial<AppState>>(() => localStorage);
+  if (!inner) return undefined;
+  // Wrap explicitly (don't spread — the inner methods must stay bound to `inner`).
+  return {
+    getItem: (name): StorageValue<Partial<AppState>> | null => {
+      try {
+        const v = inner.getItem(name);
+        // localStorage is synchronous; if a backend ever returns a Promise we
+        // can't fail-closed around its rejection here, so treat it as defaults.
+        return v instanceof Promise ? null : v;
+      } catch {
+        return null; // corrupt/unreadable blob → defaults (fail-closed)
+      }
+    },
+    setItem: (name, value) => {
+      try {
+        inner.setItem(name, value);
+      } catch {
+        /* persistence is best-effort — a read-only/absent backend never crashes the app */
+      }
+    },
+    removeItem: (name) => {
+      try {
+        inner.removeItem(name);
+      } catch {
+        /* same: removal is best-effort */
+      }
+    },
+  };
 }
 
 export const useAppStore = create<AppState>()(
   persist(
-    (set) => ({
-      selectedModel: null,
-      theme: "tokyo",
-      setSelectedModel: (name) => set({ selectedModel: name }),
-      setTheme: (theme) => set({ theme }),
-      // keymap slice — its `set` is the store setter, narrowed to the slice's shape.
+    (set, get) => ({
+      ...createNavSlice(
+        (partial) => set(partial as AppState | Partial<AppState> | ((s: AppState) => AppState | Partial<AppState>)),
+        get as () => NavSlice,
+      ),
+      ...createUiSlice(
+        (partial) => set(partial as AppState | Partial<AppState> | ((s: AppState) => AppState | Partial<AppState>)),
+        get as () => UiSlice,
+      ),
+      ...createSettingsSlice((partial) =>
+        set(partial as Partial<AppState> | ((s: AppState) => Partial<AppState>)),
+      ),
       ...createKeymapSlice((partial) =>
         set(partial as Partial<AppState> | ((s: AppState) => Partial<AppState>)),
       ),
@@ -54,20 +174,19 @@ export const useAppStore = create<AppState>()(
     {
       name: PERSIST_KEY,
       version: PERSIST_VERSION,
-      storage: createJSONStorage(() => localStorage),
-      // fail-closed merge: defaults win for any key the persisted blob lacks,
-      // AND the persisted keymap override is sanitized through the same deny-list
-      // `rebindAction` enforces (reserved tokens can't survive a stale blob).
-      merge: (persisted, current) => {
-        const p = (persisted ?? {}) as Partial<AppState>;
-        return {
-          ...current,
-          ...p,
-          keymapOverride: sanitizeKeymapOverride(p.keymapOverride),
-        };
-      },
-      // persist the selection, theme, AND the keymap override (rebindings stick).
-      partialize: (s) => ({ selectedModel: s.selectedModel, theme: s.theme, keymapOverride: s.keymapOverride }),
+      storage: failClosedStorage(),
+      partialize: (s) => partialize(s) as unknown as Partial<AppState>,
+      // migrate runs when the persisted version < PERSIST_VERSION. We always
+      // route through hydrateMerge (below, in `merge`) so a migrated blob picks
+      // up new defaults; `migrate` itself just passes the blob through (the
+      // merge-over-defaults is the real migration — additive by construction).
+      migrate: (persisted) => persisted as Partial<AppState>,
+      // fail-closed merge: defaults win for anything the persisted blob lacks,
+      // each sub-blob merged over its slice defaults (new fields appear).
+      merge: (persisted, current) => ({ ...current, ...hydrateMerge(persisted) }),
     },
   ),
 );
+
+// Re-export the defaults for tests + the chrome.
+export { SETTINGS_DEFAULTS, NAV_DEFAULTS, UI_DEFAULTS };
