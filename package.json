@@ -1,0 +1,10 @@
+{
+  "name": "cute-dbt-monorepo",
+  "private": true,
+  "version": "0.0.0",
+  "description": "cute-dbt polyglot monorepo — the Rust CLI crate (root) + the TS/React review app (apps/review). Bun workspaces now; moon-ready layout.",
+  "workspaces": [
+    "apps/*"
+  ],
+  "packageManager": "bun@1.3.10"
+}

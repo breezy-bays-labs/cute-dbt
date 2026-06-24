@@ -1,0 +1,94 @@
+# Polyglot CI — the TS/React review app (apps/review) gate battery.
+#
+# Path-filtered to apps/review/** + the workspace manifests, so it never runs on
+# Rust-only PRs (the existing Rust ci.yml is untouched). Every gate is judged by
+# RAW exit code. bun is curl-installed in a run step (NOT a third-party setup
+# action) to dodge the org Actions allowlist — adding an un-allowlisted `uses:`
+# causes startup_failure.
+name: review-app
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/review/**"
+      - "package.json"
+      - "bun.lock"
+      - ".bun-version"
+      - ".github/workflows/review-app.yml"
+  pull_request:
+    paths:
+      - "apps/review/**"
+      - "package.json"
+      - "bun.lock"
+      - ".bun-version"
+      - ".github/workflows/review-app.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: review-app-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/review
+    steps:
+      - uses: actions/checkout@v4
+        # The job needs no authenticated git after checkout (gates only read the
+        # tree), so don't persist GITHUB_TOKEN into the local git config.
+        with:
+          persist-credentials: false
+
+      # Install the pinned bun (1.3.10) via the official curl installer — no
+      # third-party setup action (allowlist-safe).
+      - name: Install bun (pinned)
+        run: |
+          curl -fsSL https://bun.sh/install | BUN_INSTALL="$HOME/.bun" bash -s "bun-v1.3.10"
+          echo "$HOME/.bun/bin" >> "$GITHUB_PATH"
+
+      - name: Verify bun version
+        run: |
+          bun --version
+          test "$(bun --version)" = "1.3.10"
+
+      - name: Install (frozen lockfile)
+        working-directory: .
+        run: bun install --frozen-lockfile
+
+      - name: Install Playwright chromium
+        run: bunx playwright install --with-deps chromium
+
+      # ── Gate battery — each judged by raw exit. ──
+      - name: typecheck (tsc --noEmit, strict)
+        run: bun run typecheck
+
+      - name: lint (eslint + boundaries)
+        run: bun run lint
+
+      - name: architecture boundaries (dependency-cruiser)
+        run: bun run depcruise
+
+      - name: unit/integration (vitest)
+        run: bun run test
+
+      - name: build (vite)
+        run: bun run build
+
+      - name: check-dist (structural local-first gate)
+        run: bun run check-dist
+
+      - name: network-denied render (behavioral local-first gate)
+        run: bun run e2e
+
+      # Coverage runs under node (bun's runtime lacks the v8 inspector coverage
+      # API); crap4ts consumes the emitted coverage JSON.
+      - name: coverage (vitest v8, under node)
+        run: node ./node_modules/vitest/vitest.mjs run --coverage
+
+      - name: crap4ts scorecard (RAW-exit gate)
+        run: node ./node_modules/crap4ts/dist/cli.js --config crap4ts.config.ts --coverage coverage/coverage-final.json

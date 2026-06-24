@@ -1,0 +1,33 @@
+import { defineConfig } from "crap4ts";
+
+// CRAP scorecard for the review app — wired as a RAW-exit CI gate on the
+// skeleton (a council MUST-FIX: wire it before there's code to hide behind).
+// Threshold 25 (the org default ceiling); the strict ≤15 set tightens per
+// honesty-fold slice as those land (S3b/S6/S7). Consumes vitest's v8 coverage
+// JSON (coverage/coverage-final.json).
+//
+// Scope = the LOGIC layers (domain/data) — the testable branching surface. The
+// presentation/glue layers (chrome/view/main/worker/stubs) are React/framework
+// wiring exercised by the Playwright behavioral gate, not unit-CRAP targets.
+export default defineConfig({
+  threshold: 25,
+  coverageMetric: "line",
+  src: ["src"],
+  exclude: [
+    "**/*.test.*",
+    "**/*.spec.*",
+    "**/*.d.ts",
+    "src/chrome/**",
+    "src/view/**",
+    "src/main.tsx",
+    "src/stubs/**",
+    "src/worker/**",
+    // adr: the highlighter modules are Pierre/Shiki + browser-bound (register +
+    // preloadHighlighter resolve only in a real DOM); they are exercised by the
+    // Playwright behavioral local-first gate (tests/local-first.spec.ts — the
+    // theme-genuinely-applied + loud-fail asserts), not by unit-CRAP. Same
+    // posture as the Rust render-layer modules covered by headless tests.
+    "src/domain/highlighter.ts",
+    "src/domain/code-highlighter.ts",
+  ],
+});
